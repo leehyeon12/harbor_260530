@@ -1,1 +1,4 @@
 .DS_Store
+
+# Claude Code 런타임 임시 파일 (세션/PID 정보)
+.claude/scheduled_tasks.lock
