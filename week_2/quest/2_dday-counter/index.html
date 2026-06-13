@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>D-day 카운터 — Date 객체 · 실시간 업데이트</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    /* Tailwind으로 처리 불가한 부분만 별도 정의 */
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .animate-pulse-glow { animation: pulseGlow 1.6s ease-in-out infinite; }
+    /* date input의 캘린더 아이콘을 밝게 (다크 테마 가독성) */
+    input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.8);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="bg-slate-950">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks
+    // ========================================
+    const { useState, useEffect, useRef, useCallback } = React
+
+    // ========================================
+    // 🎨 Design System Components
+    // ========================================
+
+    // 텍스트/날짜 입력
+    function TextInput({ label, value, onChange, onKeyDown, placeholder, type = 'text' }) {
+      return (
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium text-slate-300">{label}</label>
+          <input
+            type={type}
+            value={value}
+            onChange={onChange}
+            onKeyDown={onKeyDown}
+            placeholder={placeholder}
+            className="w-full rounded-xl bg-slate-800/80 border border-slate-700 px-4 py-3 text-slate-100
+                       placeholder-slate-500 outline-none transition
+                       focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/30"
+          />
+        </div>
+      )
+    }
+
+    // 버튼
+    function Button({ children, onClick, variant = 'primary', className = '' }) {
+      const variants = {
+        primary: 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20',
+        ghost: 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700',
+      }
+      return (
+        <button
+          onClick={onClick}
+          className={`rounded-xl px-5 py-3 transition active:scale-[0.98] ${variants[variant]} ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // 카드
+    function Card({ children, className = '' }) {
+      return (
+        <div className={`rounded-3xl bg-slate-900/70 border border-slate-800 backdrop-blur p-6 sm:p-8 shadow-2xl ${className}`}>
+          {children}
+        </div>
+      )
+    }
+
+    // 시간 단위 박스 (시 / 분 / 초)
+    function TimeUnit({ value, label }) {
+      return (
+        <div className="flex flex-col items-center">
+          <div className="min-w-[64px] sm:min-w-[80px] rounded-2xl bg-slate-800/80 border border-slate-700
+                          px-3 py-4 text-3xl sm:text-4xl font-bold tabular-nums text-emerald-400">
+            {String(value).padStart(2, '0')}
+          </div>
+          <span className="mt-2 text-xs text-slate-400 tracking-widest">{label}</span>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧠 날짜 계산 유틸 (Date 객체 학습 포인트)
+    // ========================================
+
+    // 자정 기준 일수 차이 (목표일 - 오늘). 음수면 지난 날.
+    function diffDays(targetDateStr, now) {
+      const target = new Date(targetDateStr + 'T00:00:00')
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+      const MS_PER_DAY = 1000 * 60 * 60 * 24
+      return Math.round((target - today) / MS_PER_DAY)
+    }
+
+    // 목표일 자정까지 남은 시/분/초 계산
+    function getRemainTime(targetDateStr, now) {
+      const target = new Date(targetDateStr + 'T00:00:00')
+      let totalSec = Math.floor((target - now) / 1000)
+      if (totalSec < 0) totalSec = 0
+      const hours = Math.floor(totalSec / 3600)
+      const minutes = Math.floor((totalSec % 3600) / 60)
+      const seconds = totalSec % 60
+      return { hours, minutes, seconds }
+    }
+
+    // ========================================
+    // 📄 D-day 카운터 페이지
+    // ========================================
+    function DdayCounter() {
+      // 입력 상태
+      const [eventName, setEventName] = useState('')
+      const [targetDate, setTargetDate] = useState('')
+
+      // 카운트다운 상태
+      const [counting, setCounting] = useState(false)   // 카운트다운 시작 여부
+      const [startedName, setStartedName] = useState('') // 시작 시점에 고정된 이벤트명
+      const [startedDate, setStartedDate] = useState('') // 시작 시점에 고정된 목표 날짜
+      const [now, setNow] = useState(new Date())         // 매초 갱신되는 현재 시각
+      const [error, setError] = useState('')
+
+      const intervalRef = useRef(null)
+
+      // 남은 일수 / 상태 계산 (now가 바뀔 때마다 재계산됨)
+      const dDay = counting ? diffDays(startedDate, now) : null
+      const isFuture = dDay !== null && dDay > 0
+      const isToday = dDay === 0
+      const isPast = dDay !== null && dDay < 0
+      const remain = isFuture ? getRemainTime(startedDate, now) : null
+
+      // 실시간 갱신: 미래(D-N)일 때만 매초 interval 동작, cleanup으로 정리
+      useEffect(() => {
+        if (counting && isFuture) {
+          intervalRef.current = setInterval(() => {
+            setNow(new Date())
+          }, 1000)
+        }
+        // cleanup: 언마운트 또는 의존성 변경 시 interval 정리 (메모리 누수 방지)
+        return () => {
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current)
+            intervalRef.current = null
+          }
+        }
+      }, [counting, isFuture])
+
+      // 카운트다운 시작
+      const handleStart = useCallback(() => {
+        if (!targetDate) {
+          setError('목표 날짜를 먼저 선택해 주세요.')
+          return
+        }
+        setError('')
+        setStartedName(eventName.trim())
+        setStartedDate(targetDate)
+        setNow(new Date())
+        setCounting(true)
+      }, [eventName, targetDate])
+
+      // 초기화
+      const handleReset = useCallback(() => {
+        setCounting(false)
+        setError('')
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
+        }
+      }, [])
+
+      // Enter 키 지원
+      const handleKeyDown = (e) => {
+        if (e.key === 'Enter') handleStart()
+      }
+
+      // 표시할 D-day 라벨
+      const renderDdayLabel = () => {
+        if (isToday) {
+          return (
+            <div className="text-5xl sm:text-6xl font-extrabold text-emerald-400 animate-pulse-glow">
+              🎉 D-DAY
+            </div>
+          )
+        }
+        if (isPast) {
+          return (
+            <div className="text-5xl sm:text-6xl font-extrabold text-amber-400">
+              D+{Math.abs(dDay)}
+            </div>
+          )
+        }
+        // 미래
+        return (
+          <div className="text-6xl sm:text-7xl font-extrabold text-emerald-400">
+            D-{dDay}
+          </div>
+        )
+      }
+
+      return (
+        <div className="min-h-screen w-full flex items-center justify-center px-4 py-10
+                        bg-gradient-to-b from-slate-950 via-slate-950 to-emerald-950/20">
+          <div className="w-full max-w-md">
+            {/* 헤더 */}
+            <div className="mb-6 text-center">
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-100">⏳ D-day 카운터</h1>
+              <p className="mt-2 text-sm text-slate-400">목표 날짜까지 남은 시간을 실시간으로 확인하세요</p>
+            </div>
+
+            <Card>
+              {!counting ? (
+                // ===== 입력 화면 =====
+                <div className="flex flex-col gap-5">
+                  <TextInput
+                    label="이벤트 이름 (선택)"
+                    value={eventName}
+                    onChange={(e) => setEventName(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="예: 부트캠프 최종 발표, 생일, 시험..."
+                  />
+                  <TextInput
+                    label="목표 날짜"
+                    type="date"
+                    value={targetDate}
+                    onChange={(e) => { setTargetDate(e.target.value); setError('') }}
+                    onKeyDown={handleKeyDown}
+                  />
+
+                  {/* 방어 처리: 안내 메시지 */}
+                  {error && (
+                    <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-4 py-2.5 text-sm text-red-300">
+                      ⚠️ {error}
+                    </div>
+                  )}
+
+                  <Button onClick={handleStart} className="mt-1">
+                    카운트다운 시작
+                  </Button>
+                </div>
+              ) : (
+                // ===== 카운트다운 화면 =====
+                <div className="flex flex-col items-center gap-6 text-center">
+                  {/* 이벤트 이름 / 목표 날짜 */}
+                  <div className="w-full">
+                    <p className="text-base font-medium text-slate-200">
+                      {startedName ? startedName : '목표 이벤트'}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {startedDate} 까지
+                    </p>
+                  </div>
+
+                  {/* D-day 라벨 */}
+                  <div className="py-2">
+                    {renderDdayLabel()}
+                  </div>
+
+                  {/* 실시간 시:분:초 (미래일 때만) */}
+                  {isFuture && remain && (
+                    <div className="flex items-end justify-center gap-3 sm:gap-4">
+                      <TimeUnit value={remain.hours} label="시" />
+                      <span className="pb-7 text-3xl font-bold text-slate-600">:</span>
+                      <TimeUnit value={remain.minutes} label="분" />
+                      <span className="pb-7 text-3xl font-bold text-slate-600">:</span>
+                      <TimeUnit value={remain.seconds} label="초" />
+                    </div>
+                  )}
+
+                  {/* 상태 안내 */}
+                  {isToday && (
+                    <p className="text-sm text-emerald-300">오늘이 바로 그 날이에요!</p>
+                  )}
+                  {isPast && (
+                    <p className="text-sm text-slate-400">이미 지난 날짜입니다. 타이머가 정지되었어요.</p>
+                  )}
+
+                  <Button onClick={handleReset} variant="ghost" className="mt-2 w-full">
+                    다시 설정하기
+                  </Button>
+                </div>
+              )}
+            </Card>
+
+            <p className="mt-6 text-center text-xs text-slate-600">
+              하버스쿨 부트캠프 · Week 2 Quest · Date 객체 + 실시간 업데이트
+            </p>
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🚀 App
+    // ========================================
+    function App() {
+      return <DdayCounter />
+    }
+
+    // ========================================
+    // Rendering
+    // ========================================
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>

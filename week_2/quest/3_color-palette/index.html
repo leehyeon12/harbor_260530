@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>색상 팔레트 생성기</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    /* Tailwind으로 처리 못하는 토스트 슬라이드 애니메이션만 정의 */
+    @keyframes toastIn {
+      from { opacity: 0; transform: translate(-50%, 12px); }
+      to   { opacity: 1; transform: translate(-50%, 0); }
+    }
+    .animate-toast { animation: toastIn 0.18s ease-out; }
+  </style>
+</head>
+<body class="bg-slate-950">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks
+    // ========================================
+    const { useState, useEffect, useCallback, useRef } = React
+
+    // ========================================
+    // 🎨 색상 변환 유틸 (학습 핵심: Transform)
+    // ========================================
+
+    const HEX_REGEX = /^#[0-9a-fA-F]{6}$/
+
+    // 입력값 정규화: 공백 제거 + # 없으면 자동 보정 + 대문자 통일
+    function normalizeHex(raw) {
+      let v = (raw || '').trim()
+      if (v === '') return ''
+      if (!v.startsWith('#')) v = '#' + v
+      return v.toUpperCase()
+    }
+
+    // HEX → RGB. 유효하지 않으면 null 반환.
+    function hexToRgb(hex) {
+      if (!HEX_REGEX.test(hex)) return null
+      const n = hex.slice(1)
+      return {
+        r: parseInt(n.slice(0, 2), 16),
+        g: parseInt(n.slice(2, 4), 16),
+        b: parseInt(n.slice(4, 6), 16),
+      }
+    }
+
+    // 0~255 범위로 가두기
+    const clamp = (x) => Math.max(0, Math.min(255, Math.round(x)))
+
+    // RGB → HEX
+    function rgbToHex({ r, g, b }) {
+      const toHex = (c) => clamp(c).toString(16).padStart(2, '0')
+      return ('#' + toHex(r) + toHex(g) + toHex(b)).toUpperCase()
+    }
+
+    // 밝기 변형: amount > 0 이면 255(흰색)쪽으로, < 0 이면 0(검정)쪽으로 혼합
+    // 예) amount = 0.2  → 각 채널을 흰색 방향으로 20% 이동 (밝게)
+    //     amount = -0.4 → 각 채널을 검정 방향으로 40% 이동 (어둡게)
+    function adjustBrightness(rgb, amount) {
+      const mixChannel = (c) => {
+        if (amount >= 0) return c + (255 - c) * amount   // 밝게
+        return c + c * amount                             // 어둡게 (amount 음수)
+      }
+      return { r: mixChannel(rgb.r), g: mixChannel(rgb.g), b: mixChannel(rgb.b) }
+    }
+
+    // 기준 HEX → 5단계 팔레트 배열 생성
+    function buildPalette(baseHex) {
+      const rgb = hexToRgb(baseHex)
+      if (!rgb) return []
+      const steps = [
+        { label: '어둡게',      amount: -0.4 },
+        { label: '조금 어둡게', amount: -0.2 },
+        { label: '원본',        amount: 0 },
+        { label: '조금 밝게',   amount: 0.2 },
+        { label: '밝게',        amount: 0.4 },
+      ]
+      return steps.map((s) => ({
+        label: s.label,
+        hex: rgbToHex(adjustBrightness(rgb, s.amount)),
+        isBase: s.amount === 0,
+      }))
+    }
+
+    // 배경색 대비 텍스트가 잘 보이도록 검정/흰색 결정 (YIQ 명도 공식)
+    function readableTextColor(hex) {
+      const rgb = hexToRgb(hex)
+      if (!rgb) return '#000000'
+      const yiq = (rgb.r * 299 + rgb.g * 587 + rgb.b * 114) / 1000
+      return yiq >= 140 ? '#0f172a' : '#ffffff'
+    }
+
+    const DEFAULT_COLOR = '#FF5733'
+
+    // ========================================
+    // 🎨 Design System Components
+    // ========================================
+
+    function Button({ children, onClick, variant = 'primary', className = '', type = 'button' }) {
+      const variants = {
+        primary:
+          'bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold shadow-lg shadow-emerald-500/20',
+        ghost:
+          'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700',
+      }
+      return (
+        <button
+          type={type}
+          onClick={onClick}
+          className={`px-5 py-2.5 rounded-xl transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-emerald-400/60 ${variants[variant]} ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    function Toast({ message }) {
+      if (!message) return null
+      return (
+        <div
+          role="status"
+          aria-live="polite"
+          className="animate-toast fixed bottom-8 left-1/2 z-50 -translate-x-1/2 rounded-full bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-xl shadow-emerald-500/30"
+        >
+          {message}
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 색상 스와치 컴포넌트
+    // ========================================
+
+    function Swatch({ item, onCopy }) {
+      const textColor = readableTextColor(item.hex)
+      return (
+        <button
+          onClick={() => onCopy(item.hex)}
+          title={`${item.hex} 복사하기`}
+          className={`group relative flex aspect-square w-full flex-col items-center justify-center rounded-2xl transition-transform duration-150 hover:scale-[1.04] focus:outline-none focus:ring-2 focus:ring-emerald-400 ${
+            item.isBase ? 'ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900' : ''
+          }`}
+          style={{ backgroundColor: item.hex, color: textColor }}
+          aria-label={`${item.label} ${item.hex}, 클릭하면 복사`}
+        >
+          <span className="text-xs font-semibold opacity-90 sm:text-sm">{item.label}</span>
+          <span className="mt-1 font-mono text-[11px] tracking-tight sm:text-sm">{item.hex}</span>
+          <span className="mt-2 text-[10px] font-medium opacity-0 transition-opacity group-hover:opacity-80">
+            클릭해서 복사
+          </span>
+        </button>
+      )
+    }
+
+    // ========================================
+    // 📄 메인 페이지 컴포넌트
+    // ========================================
+
+    function ColorPaletteApp() {
+      const [hexInput, setHexInput] = useState(DEFAULT_COLOR) // 텍스트 입력 값
+      const [palette, setPalette] = useState(() => buildPalette(DEFAULT_COLOR))
+      const [error, setError] = useState('')
+      const [toast, setToast] = useState('')
+      const toastTimer = useRef(null)
+
+      // 토스트 표시 (자동 사라짐)
+      const showToast = useCallback((msg) => {
+        setToast(msg)
+        if (toastTimer.current) clearTimeout(toastTimer.current)
+        toastTimer.current = setTimeout(() => setToast(''), 1600)
+      }, [])
+
+      useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
+
+      // 유효한 HEX 색을 기준으로 팔레트 생성 (생성 버튼/Color Picker용)
+      const generate = useCallback((rawHex) => {
+        const hex = normalizeHex(rawHex)
+        setHexInput(hex)
+        if (!HEX_REGEX.test(hex)) {
+          setError('올바른 HEX 코드가 아니에요. 예: #FF5733 (6자리)')
+          return
+        }
+        setError('')
+        setPalette(buildPalette(hex))
+      }, [])
+
+      // 텍스트 입력 변경: 화면에는 입력값 그대로 두고, 유효해지면 실시간 미리보기
+      const handleTextChange = (e) => {
+        const raw = e.target.value
+        setHexInput(raw)
+        const norm = normalizeHex(raw)
+        if (HEX_REGEX.test(norm)) {
+          setError('')
+          setPalette(buildPalette(norm))
+        } else {
+          setError(raw.trim() === '' ? '' : '올바른 HEX 코드가 아니에요. 예: #FF5733 (6자리)')
+        }
+      }
+
+      // Color Picker 변경: 항상 유효한 HEX → 즉시 동기화 + 생성
+      const handlePickerChange = (e) => {
+        generate(e.target.value)
+      }
+
+      // 클립보드 복사
+      const handleCopy = useCallback(async (hex) => {
+        try {
+          await navigator.clipboard.writeText(hex)
+          showToast(`${hex} 복사했어요`)
+        } catch (err) {
+          showToast('복사에 실패했어요')
+        }
+      }, [showToast])
+
+      // Color Picker에 넣을 안전한 값 (유효할 때만, 아니면 기본색)
+      const pickerValue = HEX_REGEX.test(normalizeHex(hexInput))
+        ? normalizeHex(hexInput)
+        : DEFAULT_COLOR
+
+      return (
+        <div className="min-h-screen bg-slate-950 px-4 py-10 text-slate-100 sm:py-16">
+          <div className="mx-auto w-full max-w-3xl">
+
+            {/* 헤더 */}
+            <header className="mb-8 text-center">
+              <span className="mb-3 inline-block rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400 ring-1 ring-emerald-500/30">
+                Transform · 색상 변환
+              </span>
+              <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+                🎨 색상 팔레트 생성기
+              </h1>
+              <p className="mt-2 text-sm text-slate-400">
+                기준 색 하나로 어둡게 ~ 밝게 5단계 팔레트를 만들어요. 스와치를 클릭하면 복사됩니다.
+              </p>
+            </header>
+
+            {/* 입력 카드 */}
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-5 shadow-2xl sm:p-7">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
+
+                {/* HEX 텍스트 입력 */}
+                <div className="flex-1">
+                  <label htmlFor="hex" className="mb-1.5 block text-sm font-medium text-slate-300">
+                    HEX 코드
+                  </label>
+                  <input
+                    id="hex"
+                    type="text"
+                    value={hexInput}
+                    onChange={handleTextChange}
+                    placeholder="#FF5733"
+                    spellCheck="false"
+                    className={`w-full rounded-xl border bg-slate-950 px-4 py-2.5 font-mono text-base text-slate-100 placeholder-slate-600 transition focus:outline-none focus:ring-2 ${
+                      error
+                        ? 'border-rose-500/60 focus:ring-rose-400/50'
+                        : 'border-slate-700 focus:ring-emerald-400/60'
+                    }`}
+                    aria-invalid={!!error}
+                    aria-describedby="hex-help"
+                  />
+                </div>
+
+                {/* Color Picker */}
+                <div>
+                  <label htmlFor="picker" className="mb-1.5 block text-sm font-medium text-slate-300">
+                    색 선택기
+                  </label>
+                  <input
+                    id="picker"
+                    type="color"
+                    value={pickerValue}
+                    onChange={handlePickerChange}
+                    className="h-[46px] w-16 cursor-pointer rounded-xl border border-slate-700 bg-slate-950 p-1"
+                    aria-label="색상 선택기"
+                  />
+                </div>
+
+                {/* 생성 버튼 */}
+                <Button onClick={() => generate(hexInput)} className="h-[46px] whitespace-nowrap">
+                  생성
+                </Button>
+              </div>
+
+              {/* 안내 / 에러 메시지 */}
+              <p id="hex-help" className="mt-3 min-h-[20px] text-sm">
+                {error ? (
+                  <span className="text-rose-400">⚠ {error}</span>
+                ) : (
+                  <span className="text-slate-500">
+                    # 없이 입력해도 자동으로 보정돼요. (예: FF5733 → #FF5733)
+                  </span>
+                )}
+              </p>
+            </section>
+
+            {/* 팔레트 그리드 */}
+            <section className="mt-8">
+              {palette.length > 0 ? (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 sm:gap-4">
+                  {palette.map((item) => (
+                    <Swatch key={item.label} item={item} onCopy={handleCopy} />
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-700 py-16 text-center text-slate-500">
+                  유효한 HEX 코드를 입력하면 팔레트가 여기에 나타나요.
+                </div>
+              )}
+            </section>
+
+            <footer className="mt-10 text-center text-xs text-slate-600">
+              HEX → RGB → 밝기 변형 → HEX · 하버스쿨 부트캠프 Week 2
+            </footer>
+          </div>
+
+          <Toast message={toast} />
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🚀 Rendering
+    // ========================================
+    ReactDOM.createRoot(document.getElementById('root')).render(<ColorPaletteApp />)
+  </script>
+</body>
+</html>

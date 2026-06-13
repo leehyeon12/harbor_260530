@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>만 나이 계산기 — React 버전</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    /* Tailwind으로 표현하기 어려운 결과 카드 등장 애니메이션 */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-up { animation: fadeUp 0.35s ease-out; }
+  </style>
+</head>
+<body class="bg-slate-950">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState } = React
+
+    // ========================================
+    // 🎨 Design System Components (순수 표현용, 비즈니스 로직 없음)
+    // ========================================
+
+    // 날짜 입력 필드 (라벨 + input type="date")
+    function DateInput({ label, value, onChange, onKeyDown, max }) {
+      return (
+        <label className="block">
+          <span className="block mb-2 text-sm font-medium text-slate-300">{label}</span>
+          <input
+            type="date"
+            value={value}
+            onChange={onChange}
+            onKeyDown={onKeyDown}
+            max={max}
+            className="w-full rounded-xl bg-slate-800/80 border border-slate-700
+                       px-4 py-3 text-slate-100 outline-none transition
+                       focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/40
+                       [color-scheme:dark]"
+          />
+        </label>
+      )
+    }
+
+    // 기본 버튼 (포인트 컬러 emerald)
+    function Button({ children, onClick, className = '' }) {
+      return (
+        <button
+          onClick={onClick}
+          className={`w-full rounded-xl bg-emerald-500 px-4 py-3 font-semibold
+                      text-slate-950 transition hover:bg-emerald-400
+                      active:scale-[0.98] focus:outline-none
+                      focus:ring-2 focus:ring-emerald-400/50 ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // 안내/에러 메시지 박스 (방어 처리 표시용)
+    function Notice({ children }) {
+      return (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10
+                        px-4 py-3 text-sm text-amber-300 animate-fade-up">
+          {children}
+        </div>
+      )
+    }
+
+    // 결과 강조 카드
+    function ResultCard({ children }) {
+      return (
+        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10
+                        p-6 text-center animate-fade-up">
+          {children}
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧮 만 나이 계산 로직 (순수 함수)
+    // ========================================
+
+    // 만 나이 = (올해 - 출생연도), 단 올해 생일이 아직 안 지났으면 -1
+    // 비교는 월 → 일 순서로 진행. 기준일 today 는 호출 측에서 new Date() 로 전달.
+    function calcAge(birth, today) {
+      let age = today.getFullYear() - birth.getFullYear()
+      const monthGap = today.getMonth() - birth.getMonth()
+      const dayGap = today.getDate() - birth.getDate()
+      // 아직 이번 달이 안 됐거나, 같은 달인데 생일 날짜가 안 지났으면 한 살 빼기
+      if (monthGap < 0 || (monthGap === 0 && dayGap < 0)) {
+        age -= 1
+      }
+      return age
+    }
+
+    // 다음 생일까지 남은 일수 + 오늘이 생일인지 여부
+    function getNextBirthday(birth, today) {
+      // 시/분/초 영향을 없애기 위해 자정 기준으로 정규화
+      const t = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+      // 오늘이 생일인지 (월/일 일치)
+      const isToday =
+        birth.getMonth() === today.getMonth() &&
+        birth.getDate() === today.getDate()
+      if (isToday) return { days: 0, isToday: true }
+
+      // 올해 생일 → 이미 지났으면 내년 생일로
+      let next = new Date(t.getFullYear(), birth.getMonth(), birth.getDate())
+      if (next < t) {
+        next = new Date(t.getFullYear() + 1, birth.getMonth(), birth.getDate())
+      }
+
+      const oneDay = 1000 * 60 * 60 * 24
+      const days = Math.round((next - t) / oneDay)
+      return { days, isToday: false }
+    }
+
+    // ========================================
+    // 📄 Page Component — 만 나이 계산기
+    // ========================================
+
+    function AgeCalculator() {
+      // 입력값 (yyyy-mm-dd 문자열)
+      const [birthday, setBirthday] = useState('')
+      // 계산 결과 { age, days, isToday }
+      const [result, setResult] = useState(null)
+      // 안내/에러 메시지
+      const [error, setError] = useState('')
+
+      // 오늘 날짜 문자열 (input max 로 미래 날짜 선택 1차 차단)
+      const todayStr = new Date().toISOString().split('T')[0]
+
+      // 버튼 클릭 / Enter 시 실행되는 계산 핸들러
+      function handleCalculate() {
+        // 방어 1: 빈 입력
+        if (!birthday) {
+          setResult(null)
+          setError('생년월일을 먼저 골라주세요.')
+          return
+        }
+
+        // 입력 문자열을 로컬 날짜로 파싱 (타임존 밀림 방지)
+        const [y, m, d] = birthday.split('-').map(Number)
+        const birth = new Date(y, m - 1, d)
+        const today = new Date()
+
+        // 방어 2: 미래 날짜
+        const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+        if (birth > todayMidnight) {
+          setResult(null)
+          setError('미래 날짜는 계산할 수 없어요. 올바른 생년월일을 골라주세요.')
+          return
+        }
+
+        const age = calcAge(birth, today)
+        const { days, isToday } = getNextBirthday(birth, today)
+
+        setError('')
+        setResult({ age, days, isToday })
+      }
+
+      // input 에서 Enter 키 입력도 계산 트리거로 지원
+      function handleKeyDown(e) {
+        if (e.key === 'Enter') handleCalculate()
+      }
+
+      return (
+        <main className="min-h-screen flex items-center justify-center px-4 py-10
+                         bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950">
+          <div className="w-full max-w-md">
+            {/* 헤더 */}
+            <header className="mb-8 text-center">
+              <div className="mb-3 inline-flex h-14 w-14 items-center justify-center
+                              rounded-2xl bg-emerald-500/15 text-3xl">🎂</div>
+              <h1 className="text-2xl font-bold text-slate-100">만 나이 계산기</h1>
+              <p className="mt-2 text-sm text-slate-400">
+                생년월일을 고르고 버튼을 누르면 오늘 기준 만 나이가 나와요.
+              </p>
+            </header>
+
+            {/* 입력 카드 */}
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/70
+                                p-6 shadow-2xl shadow-emerald-950/30 backdrop-blur">
+              <div className="space-y-4">
+                <DateInput
+                  label="생년월일"
+                  value={birthday}
+                  onChange={(e) => setBirthday(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  max={todayStr}
+                />
+                <Button onClick={handleCalculate}>만 나이 계산하기</Button>
+
+                {/* 안내/에러 메시지 */}
+                {error && <Notice>{error}</Notice>}
+
+                {/* 결과 */}
+                {result && (
+                  <ResultCard>
+                    <p className="text-sm text-slate-300">당신의 만 나이는</p>
+                    <p className="my-1 text-5xl font-extrabold text-emerald-400">
+                      {result.age}
+                      <span className="ml-1 text-2xl font-bold text-emerald-300">세</span>
+                    </p>
+
+                    {/* 보너스: 다음 생일까지 남은 일수 / 오늘 생일 메시지 */}
+                    {result.isToday ? (
+                      <p className="mt-3 text-base font-semibold text-emerald-300">
+                        🎉 오늘이 바로 생일이에요! 축하합니다!
+                      </p>
+                    ) : (
+                      <p className="mt-3 text-sm text-slate-300">
+                        다음 생일까지{' '}
+                        <span className="font-bold text-emerald-400">{result.days}일</span>{' '}
+                        남았어요.
+                      </p>
+                    )}
+                  </ResultCard>
+                )}
+              </div>
+            </section>
+
+            <footer className="mt-6 text-center text-xs text-slate-600">
+              기준일: 오늘 ({todayStr}) · 만 나이 기준 계산
+            </footer>
+          </div>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 🚀 App & Rendering
+    // ========================================
+
+    function App() {
+      return <AgeCalculator />
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>

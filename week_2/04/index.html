@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>비만도(BMI) 측정기 — 입력값으로 결과가 바뀌어요</title>
+
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React 18 + ReactDOM (CDN, 빌드 도구 없이 사용) -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+
+    <!-- Babel: 브라우저에서 JSX(<div> 같은 문법)를 바로 번역해줘요 -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+
+  <body class="min-h-screen bg-slate-950 text-slate-100">
+    <div id="root"></div>
+
+    <!-- 여기서부터 React 코드 (type="text/babel" 이라서 JSX를 쓸 수 있어요) -->
+    <script type="text/babel">
+      // ========================================
+      // React Hooks 꺼내오기
+      // useState = "상태(state)"를 만드는 도구.
+      //   - 03에서는 count 하나만 썼지만, 04에서는 키/몸무게 두 개를 관리해요.
+      // ========================================
+      const { useState } = React;
+
+      // ========================================
+      // 🧮 BMI 분류 함수 (계산 로직만 따로 떼어둠)
+      //   - 대한비만학회 아시아 기준을 그대로 옮긴 거예요.
+      //   - bmi 숫자를 넣으면 { label, badge } 를 돌려줘요.
+      //     label = 화면에 보여줄 한글 분류명
+      //     badge = Tailwind 색상 클래스 (분류별로 색이 달라요)
+      // ========================================
+      function classifyBmi(bmi) {
+        if (bmi < 18.5) {
+          // 저체중 → 파랑(sky) 계열
+          return { label: "저체중", badge: "bg-sky-500/20 text-sky-300 border-sky-500/40" };
+        } else if (bmi < 23) {
+          // 정상 → 초록(emerald) 계열
+          return { label: "정상", badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40" };
+        } else if (bmi < 25) {
+          // 과체중 → 노랑(amber) 계열
+          return { label: "과체중", badge: "bg-amber-500/20 text-amber-300 border-amber-500/40" };
+        } else {
+          // 비만 → 빨강(red) 계열
+          return { label: "비만", badge: "bg-red-500/20 text-red-300 border-red-500/40" };
+        }
+      }
+
+      // ========================================
+      // 🚀 App 컴포넌트
+      //   - 03처럼 "상태(state)"만 바꾸면 화면이 자동으로 다시 그려져요.
+      //   - 여기서는 입력칸(키, 몸무게)이 곧 상태예요.
+      // ========================================
+      function App() {
+        // 👇 키(cm)와 몸무게(kg)를 각각 상태로 관리해요.
+        //    입력칸은 보통 문자열("")로 시작해요. (빈 입력을 표현하기 좋아요)
+        const [height, setHeight] = useState(""); // 키, 단위: cm
+        const [weight, setWeight] = useState(""); // 몸무게, 단위: kg
+
+        // 👇 입력값(문자열)을 숫자로 바꿔요. 빈 칸이면 NaN(숫자아님)이 돼요.
+        const h = parseFloat(height);
+        const w = parseFloat(weight);
+
+        // 👇 "계산해도 되는 입력인가?" 판단
+        //    - 둘 다 진짜 숫자이고(0 이상이 아니라 0 초과)
+        //    - 키/몸무게가 0 이하면 말이 안 되니 계산 안 해요.
+        const isValid = !isNaN(h) && !isNaN(w) && h > 0 && w > 0;
+
+        // 👇 BMI = 몸무게(kg) / (키(m))²
+        //    cm로 받은 키를 m로 바꿔야 해요. (170cm → 1.7m)
+        let bmi = null;
+        let result = null;
+        if (isValid) {
+          const heightM = h / 100; // cm → m 변환
+          bmi = w / (heightM * heightM); // BMI 공식
+          result = classifyBmi(bmi); // 분류 라벨 + 색상 구하기
+        }
+
+        return (
+          <main className="mx-auto max-w-3xl px-6 py-10">
+            {/* ── 제목 / 한 줄 설명 (03과 같은 어조) ── */}
+            <h1 className="text-3xl font-black">비만도(BMI) 측정기</h1>
+            <p className="mt-2 text-slate-300">
+              키와 몸무게라는 <span className="font-semibold text-purple-300">state(상태)</span>가 바뀌면
+              결과가 <span className="font-semibold text-purple-300">자동으로 다시 계산</span>돼요.
+            </p>
+            <p className="mt-1 text-sm text-slate-400">
+              03에서는 버튼으로 상태를 바꿨다면, 여기서는 <code className="text-slate-200">입력칸</code>이 상태를 바꿔요.
+            </p>
+
+            {/* ── 입력 카드 (03의 카드 스타일을 그대로 이어받음) ── */}
+            <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+              <h2 className="text-xl font-extrabold">내 정보 입력</h2>
+              <p className="mt-2 text-slate-300">
+                숫자를 입력하면 아래 결과가 <span className="font-semibold">실시간</span>으로 바뀌어요.
+              </p>
+
+              <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {/* 키 입력칸 */}
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-300">키 (cm)</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    value={height}
+                    onChange={(e) => setHeight(e.target.value)}
+                    placeholder="예: 170"
+                    className="rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-lg text-slate-100 outline-none focus:border-purple-500"
+                  />
+                </label>
+
+                {/* 몸무게 입력칸 */}
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-300">몸무게 (kg)</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    value={weight}
+                    onChange={(e) => setWeight(e.target.value)}
+                    placeholder="예: 65"
+                    className="rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-lg text-slate-100 outline-none focus:border-purple-500"
+                  />
+                </label>
+              </div>
+            </section>
+
+            {/* ── 결과 카드 ── */}
+            <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+              <h2 className="text-xl font-extrabold">측정 결과</h2>
+
+              {/* 입력이 유효하지 않으면 안내 문구만 보여줘요 (계산 안 함) */}
+              {!isValid ? (
+                <div className="mt-4 flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-slate-700 bg-black/20 py-10 text-center">
+                  <span className="text-4xl" aria-hidden="true">📋</span>
+                  <p className="text-slate-300">키와 몸무게를 입력해주세요.</p>
+                  <p className="text-xs text-slate-500">0보다 큰 숫자를 넣어야 계산돼요.</p>
+                </div>
+              ) : (
+                // 유효하면 BMI 수치 + 분류 배지를 보여줘요.
+                <div className="mt-6 flex flex-col items-center justify-center gap-4">
+                  {/* BMI 수치: 소수점 1자리로 표시 (toFixed(1)) */}
+                  <div className="flex flex-col items-center">
+                    <span className="text-sm text-slate-400">나의 BMI 지수</span>
+                    <span className="mt-1 text-6xl font-black tracking-tight">
+                      {bmi.toFixed(1)}
+                    </span>
+                  </div>
+
+                  {/* 분류 배지: 분류별로 색이 달라요 (result.badge) */}
+                  <span
+                    className={`rounded-full border px-5 py-2 text-lg font-bold ${result.badge}`}
+                  >
+                    {result.label}
+                  </span>
+                </div>
+              )}
+            </section>
+
+            {/* ── 기준 안내 카드 (학습용 참고표) ── */}
+            <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+              <h2 className="text-xl font-extrabold">BMI 분류 기준 (아시아 기준)</h2>
+              <p className="mt-1 text-xs text-slate-400">대한비만학회 기준이에요.</p>
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="rounded-xl border border-sky-500/30 bg-sky-950/20 p-3 text-center">
+                  <p className="text-sm font-bold text-sky-300">저체중</p>
+                  <p className="mt-1 text-xs text-slate-400">18.5 미만</p>
+                </div>
+                <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-3 text-center">
+                  <p className="text-sm font-bold text-emerald-300">정상</p>
+                  <p className="mt-1 text-xs text-slate-400">18.5 ~ 23 미만</p>
+                </div>
+                <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-center">
+                  <p className="text-sm font-bold text-amber-300">과체중</p>
+                  <p className="mt-1 text-xs text-slate-400">23 ~ 25 미만</p>
+                </div>
+                <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-3 text-center">
+                  <p className="text-sm font-bold text-red-300">비만</p>
+                  <p className="mt-1 text-xs text-slate-400">25 이상</p>
+                </div>
+              </div>
+              <p className="mt-4 text-sm text-slate-400">
+                포인트: 우리가 한 일은 <code className="text-slate-200">setHeight</code>·<code className="text-slate-200">setWeight</code> 로
+                <span className="font-semibold text-slate-200"> 상태를 바꾼 것</span> 뿐이에요.
+                BMI 계산과 색깔 배지는 React가 알아서 다시 그려줬어요.
+              </p>
+            </section>
+
+            {/* ── 검증 시나리오 안내 (교육용) ──
+                1) 키 170 / 몸무게 65 → 65 / (1.7)² = 22.49... → "22.5" / 정상
+                2) 빈 입력            → 안내 문구, 계산 안 함
+                3) 키 160 / 몸무게 70 → 70 / (1.6)² = 27.34... → "27.3" / 비만
+            */}
+          </main>
+        );
+      }
+
+      // ========================================
+      // 화면에 그리기 (React 18 방식)
+      // ========================================
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
