@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>더치페이 계산기</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo } = React
+
+    // ========================================
+    // 유틸 (배열/반복문 계산의 보조)
+    // ========================================
+
+    // 고유 id 생성 (인원/메뉴 배열 key 용)
+    let idSeed = 1
+    function makeId() {
+      idSeed += 1
+      return idSeed
+    }
+
+    // 원화 천단위 콤마 표기
+    function formatWon(amount) {
+      return Math.round(amount).toLocaleString('ko-KR') + '원'
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트 (순수 표현용)
+    // ========================================
+
+    function Button({ variant = 'primary', size = 'md', onClick, disabled, className = '', children }) {
+      const base = 'inline-flex items-center justify-center font-semibold rounded-lg transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed'
+      const variants = {
+        primary: 'bg-indigo-600 text-white hover:bg-indigo-700',
+        secondary: 'bg-slate-200 text-slate-700 hover:bg-slate-300',
+        danger: 'bg-red-100 text-red-600 hover:bg-red-200',
+        ghost: 'bg-transparent text-indigo-600 hover:bg-indigo-50'
+      }
+      const sizes = { sm: 'text-sm px-2.5 py-1', md: 'text-sm px-4 py-2', lg: 'text-base px-5 py-2.5' }
+      return (
+        <button className={`${base} ${variants[variant]} ${sizes[size]} ${className}`} onClick={onClick} disabled={disabled}>
+          {children}
+        </button>
+      )
+    }
+
+    function Input({ label, type = 'text', value, onChange, placeholder, className = '', ...rest }) {
+      return (
+        <label className={`block ${className}`}>
+          {label && <span className="block text-xs font-medium text-slate-500 mb-1">{label}</span>}
+          <input
+            type={type}
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            {...rest}
+          />
+        </label>
+      )
+    }
+
+    function Card({ className = '', children }) {
+      return <div className={`bg-white rounded-2xl shadow-sm border border-slate-100 ${className}`}>{children}</div>
+    }
+
+    function Badge({ className = '', children }) {
+      return <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${className}`}>{children}</span>
+    }
+
+    // ========================================
+    // 🧩 인원 카드 (각자 먹은 메뉴 입력 + 소계)
+    // ========================================
+
+    function PersonCard({ person, subtotal, onRename, onRemove, onAddItem, onChangeItem, onRemoveItem }) {
+      const [menuName, setMenuName] = useState('')
+      const [menuPrice, setMenuPrice] = useState('')
+
+      function handleAdd() {
+        const price = parseInt(menuPrice, 10)
+        if (!menuName.trim() || isNaN(price) || price <= 0) return
+        onAddItem(person.id, menuName.trim(), price)
+        setMenuName('')
+        setMenuPrice('')
+      }
+
+      return (
+        <Card className="p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              value={person.name}
+              onChange={(e) => onRename(person.id, e.target.value)}
+              className="flex-1 font-bold text-slate-800 bg-transparent border-b border-transparent hover:border-slate-200 focus:border-indigo-400 focus:outline-none py-1"
+            />
+            <Badge className="bg-indigo-50 text-indigo-600">{formatWon(subtotal)}</Badge>
+            <Button variant="danger" size="sm" onClick={() => onRemove(person.id)}>삭제</Button>
+          </div>
+
+          {/* 메뉴 목록 — 배열을 반복문(map)으로 렌더 */}
+          <ul className="space-y-1.5 mb-3">
+            {person.items.length === 0 && (
+              <li className="text-xs text-slate-400 py-2 text-center">먹은 메뉴를 추가하세요</li>
+            )}
+            {person.items.map((item) => (
+              <li key={item.id} className="flex items-center gap-2 text-sm">
+                <span className="flex-1 text-slate-700">{item.name}</span>
+                <span className="text-slate-500 tabular-nums">{formatWon(item.price)}</span>
+                <button onClick={() => onRemoveItem(person.id, item.id)} className="text-slate-300 hover:text-red-500 px-1">✕</button>
+              </li>
+            ))}
+          </ul>
+
+          {/* 메뉴 추가 입력 */}
+          <div className="flex gap-2">
+            <Input
+              placeholder="메뉴명"
+              value={menuName}
+              onChange={(e) => setMenuName(e.target.value)}
+              className="flex-1"
+            />
+            <Input
+              type="number"
+              placeholder="가격"
+              value={menuPrice}
+              onChange={(e) => setMenuPrice(e.target.value)}
+              className="w-24"
+              onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }}
+            />
+            <Button variant="secondary" onClick={handleAdd} className="shrink-0">추가</Button>
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🧩 할인 입력 컨트롤
+    // ========================================
+
+    function DiscountControl({ discount, onChange }) {
+      return (
+        <Card className="p-4">
+          <h2 className="font-bold text-slate-800 mb-3">할인 적용</h2>
+          <div className="flex gap-2">
+            <select
+              value={discount.type}
+              onChange={(e) => onChange({ ...discount, type: e.target.value })}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            >
+              <option value="percent">정률 (%)</option>
+              <option value="amount">정액 (원)</option>
+            </select>
+            <Input
+              type="number"
+              value={discount.value}
+              onChange={(e) => onChange({ ...discount, value: e.target.value })}
+              placeholder="0"
+              className="flex-1"
+            />
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🧩 결과 패널 (각자 부담액 + 검산)
+    // ========================================
+
+    function ResultPanel({ result }) {
+      const { total, discountAmount, afterDiscount, shares } = result
+      return (
+        <Card className="p-5 bg-gradient-to-br from-indigo-600 to-indigo-500 text-white">
+          <h2 className="font-bold text-lg mb-4">정산 결과</h2>
+
+          <ul className="space-y-2 mb-4">
+            {shares.map((s) => (
+              <li key={s.id} className="flex items-center justify-between">
+                <span className="opacity-90">{s.name}</span>
+                <span className="font-bold tabular-nums text-lg">{formatWon(s.pay)}</span>
+              </li>
+            ))}
+            {shares.length === 0 && <li className="opacity-80 text-sm">인원과 메뉴를 입력하면 계산됩니다.</li>}
+          </ul>
+
+          <div className="border-t border-white/30 pt-3 space-y-1 text-sm">
+            <div className="flex justify-between opacity-90"><span>전체 합계</span><span className="tabular-nums">{formatWon(total)}</span></div>
+            <div className="flex justify-between opacity-90"><span>할인액</span><span className="tabular-nums">- {formatWon(discountAmount)}</span></div>
+            <div className="flex justify-between font-bold text-base"><span>할인 후 총액</span><span className="tabular-nums">{formatWon(afterDiscount)}</span></div>
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🚀 App — 상태 관리 + 핵심 계산 로직
+    // ========================================
+
+    function App() {
+      // 인원 배열 (각 인원은 먹은 메뉴 배열을 가짐)
+      const [people, setPeople] = useState([
+        { id: makeId(), name: '현재', items: [
+          { id: makeId(), name: '파스타', price: 18000 },
+          { id: makeId(), name: '콜라', price: 3000 }
+        ] },
+        { id: makeId(), name: '민수', items: [
+          { id: makeId(), name: '스테이크', price: 32000 },
+          { id: makeId(), name: '맥주', price: 6000 }
+        ] }
+      ])
+      const [discount, setDiscount] = useState({ type: 'percent', value: '10' })
+
+      // --- 인원 조작 ---
+      function addPerson() {
+        setPeople([...people, { id: makeId(), name: `인원 ${people.length + 1}`, items: [] }])
+      }
+      function renamePerson(personId, name) {
+        setPeople(people.map((p) => p.id === personId ? { ...p, name } : p))
+      }
+      function removePerson(personId) {
+        setPeople(people.filter((p) => p.id !== personId))
+      }
+
+      // --- 메뉴 조작 ---
+      function addItem(personId, name, price) {
+        setPeople(people.map((p) => p.id === personId
+          ? { ...p, items: [...p.items, { id: makeId(), name, price }] }
+          : p))
+      }
+      function removeItem(personId, itemId) {
+        setPeople(people.map((p) => p.id === personId
+          ? { ...p, items: p.items.filter((it) => it.id !== itemId) }
+          : p))
+      }
+
+      // --- 핵심 계산 (배열/반복문/reduce) ---
+      const result = useMemo(() => {
+        // 1) 인원별 소계 = 그 사람이 먹은 메뉴 가격 합
+        const subtotals = people.map((p) => p.items.reduce((sum, it) => sum + it.price, 0))
+        // 2) 전체 합계
+        const total = subtotals.reduce((sum, v) => sum + v, 0)
+        // 3) 할인액 계산 (정률/정액, 음수·초과 방지)
+        const dv = parseFloat(discount.value) || 0
+        let discountAmount = discount.type === 'percent'
+          ? Math.round(total * dv / 100)
+          : dv
+        discountAmount = Math.max(0, Math.min(discountAmount, total))
+        const afterDiscount = total - discountAmount
+
+        // 4) 각자 부담액 = 할인 후 총액 × (소계 / 전체합계), 반올림
+        //    단수차이는 마지막 인원이 흡수해 합이 정확히 일치하도록 검산
+        let allocated = 0
+        const shares = people.map((p, i) => {
+          const subtotal = subtotals[i]
+          let pay = total > 0 ? Math.round(afterDiscount * subtotal / total) : 0
+          allocated += pay
+          return { id: p.id, name: p.name, subtotal, pay }
+        })
+        if (shares.length > 0 && total > 0) {
+          // 마지막 인원에게 반올림 오차 보정
+          shares[shares.length - 1].pay += afterDiscount - allocated
+        }
+        return { subtotals, total, discountAmount, afterDiscount, shares }
+      }, [people, discount])
+
+      return (
+        <div className="max-w-3xl mx-auto px-4 py-8">
+          <header className="mb-6">
+            <h1 className="text-2xl font-extrabold text-slate-800">💸 더치페이 계산기</h1>
+            <p className="text-sm text-slate-500 mt-1">인원별로 먹은 메뉴를 입력하면, 할인까지 반영해 각자 낼 금액을 계산합니다.</p>
+          </header>
+
+          <div className="grid md:grid-cols-2 gap-4 items-start">
+            {/* 왼쪽: 입력 영역 */}
+            <div className="space-y-4">
+              {people.map((p, i) => (
+                <PersonCard
+                  key={p.id}
+                  person={p}
+                  subtotal={result.subtotals[i]}
+                  onRename={renamePerson}
+                  onRemove={removePerson}
+                  onAddItem={addItem}
+                  onRemoveItem={removeItem}
+                />
+              ))}
+              <Button variant="ghost" onClick={addPerson} className="w-full border border-dashed border-indigo-300 py-3">+ 인원 추가</Button>
+            </div>
+
+            {/* 오른쪽: 할인 + 결과 (sticky) */}
+            <div className="space-y-4 md:sticky md:top-8">
+              <DiscountControl discount={discount} onChange={setDiscount} />
+              <ResultPanel result={result} />
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 렌더링
+    // ========================================
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
