@@ -15,19 +15,23 @@
     const { useState, useMemo } = React
 
     // ========================================
-    // 유틸 (배열/반복문 계산의 보조)
+    // 유틸
     // ========================================
 
-    // 고유 id 생성 (인원/메뉴 배열 key 용)
     let idSeed = 1
     function makeId() {
       idSeed += 1
       return idSeed
     }
 
-    // 원화 천단위 콤마 표기
     function formatWon(amount) {
       return Math.round(amount).toLocaleString('ko-KR') + '원'
+    }
+
+    // 명부에서 이름 찾기
+    function nameOf(people, id) {
+      const p = people.find((x) => x.id === id)
+      return p ? p.name : '?'
     }
 
     // ========================================
@@ -75,325 +79,470 @@
     }
 
     // ========================================
-    // 🧩 인원 카드 (각자 먹은 메뉴 입력 + 소계)
+    // 🧮 계산 헬퍼 (배열/반복문/reduce)
     // ========================================
 
-    function PersonCard({ person, subtotal, onRename, onRemove, onAddItem, onChangeItem, onRemoveItem }) {
+    // 한 가게의 멤버별 부담액 계산
+    function calcPlace(place, splitMode) {
+      const members = place.members
+      const n = members.length
+      const subtotals = members.map((m) => m.items.reduce((sum, it) => sum + it.price, 0))
+      const total = subtotals.reduce((sum, v) => sum + v, 0)
+      const dv = parseFloat(place.discount.value) || 0
+      let discountAmount = place.discount.type === 'percent' ? Math.round(total * dv / 100) : dv
+      discountAmount = Math.max(0, Math.min(discountAmount, total))
+      const afterDiscount = total - discountAmount
+
+      let allocated = 0
+      const shares = members.map((m, i) => {
+        let pay
+        if (splitMode === 'equal') pay = n > 0 ? Math.round(afterDiscount / n) : 0
+        else pay = total > 0 ? Math.round(afterDiscount * subtotals[i] / total) : 0
+        allocated += pay
+        return { personId: m.personId, subtotal: subtotals[i], pay }
+      })
+      if (shares.length > 0) shares[shares.length - 1].pay += afterDiscount - allocated // 단수차이 보정
+
+      return { subtotals, total, discountAmount, afterDiscount, shares }
+    }
+
+    // ========================================
+    // 🧩 멤버별 메뉴 입력 (한 가게 안의 한 사람)
+    // ========================================
+
+    function MemberMenu({ placeId, member, name, pay, onAddItem, onRemoveItem, onRemoveMember }) {
       const [menuName, setMenuName] = useState('')
       const [menuPrice, setMenuPrice] = useState('')
+      const subtotal = member.items.reduce((sum, it) => sum + it.price, 0)
 
       function handleAdd() {
         const price = parseInt(menuPrice, 10)
         if (!menuName.trim() || isNaN(price) || price <= 0) return
-        onAddItem(person.id, menuName.trim(), price)
+        onAddItem(placeId, member.personId, menuName.trim(), price)
         setMenuName('')
         setMenuPrice('')
       }
 
       return (
-        <Card className="p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <input
-              value={person.name}
-              onChange={(e) => onRename(person.id, e.target.value)}
-              className="flex-1 font-bold text-slate-800 bg-transparent border-b border-transparent hover:border-slate-200 focus:border-indigo-400 focus:outline-none py-1"
-            />
-            <Badge className="bg-indigo-50 text-indigo-600">{formatWon(subtotal)}</Badge>
-            <Button variant="danger" size="sm" onClick={() => onRemove(person.id)}>삭제</Button>
+        <div className="rounded-xl border border-slate-200 p-3">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="font-semibold text-slate-800">{name}</span>
+            <Badge className="bg-slate-100 text-slate-600">소계 {formatWon(subtotal)}</Badge>
+            <Badge className="bg-indigo-50 text-indigo-600">부담 {formatWon(pay)}</Badge>
+            <button onClick={() => onRemoveMember(placeId, member.personId)} className="ml-auto text-slate-300 hover:text-red-500 text-xs">참여 취소</button>
           </div>
 
-          {/* 메뉴 목록 — 배열을 반복문(map)으로 렌더 */}
-          <ul className="space-y-1.5 mb-3">
-            {person.items.length === 0 && (
-              <li className="text-xs text-slate-400 py-2 text-center">먹은 메뉴를 추가하세요</li>
-            )}
-            {person.items.map((item) => (
-              <li key={item.id} className="flex items-center gap-2 text-sm">
-                <span className="flex-1 text-slate-700">{item.name}</span>
-                <span className="text-slate-500 tabular-nums">{formatWon(item.price)}</span>
-                <button onClick={() => onRemoveItem(person.id, item.id)} className="text-slate-300 hover:text-red-500 px-1">✕</button>
+          <ul className="space-y-1 mb-2">
+            {member.items.length === 0 && <li className="text-xs text-slate-400">먹은 메뉴를 추가하세요</li>}
+            {member.items.map((it) => (
+              <li key={it.id} className="flex items-center gap-2 text-sm">
+                <span className="flex-1 text-slate-700">{it.name}</span>
+                <span className="text-slate-500 tabular-nums">{formatWon(it.price)}</span>
+                <button onClick={() => onRemoveItem(placeId, member.personId, it.id)} className="text-slate-300 hover:text-red-500 px-1">✕</button>
               </li>
             ))}
           </ul>
 
-          {/* 메뉴 추가 입력 */}
           <div className="flex gap-2">
-            <Input
-              placeholder="메뉴명"
-              value={menuName}
-              onChange={(e) => setMenuName(e.target.value)}
-              className="flex-1"
-            />
-            <Input
-              type="number"
-              placeholder="가격"
-              value={menuPrice}
-              onChange={(e) => setMenuPrice(e.target.value)}
-              className="w-24"
-              onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }}
-            />
+            <Input placeholder="메뉴명" value={menuName} onChange={(e) => setMenuName(e.target.value)} className="flex-1" />
+            <Input type="number" placeholder="가격" value={menuPrice} onChange={(e) => setMenuPrice(e.target.value)} className="w-24"
+              onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }} />
             <Button variant="secondary" onClick={handleAdd} className="shrink-0">추가</Button>
-          </div>
-        </Card>
-      )
-    }
-
-    // ========================================
-    // 🧩 할인 입력 컨트롤
-    // ========================================
-
-    function DiscountControl({ discount, onChange }) {
-      return (
-        <Card className="p-4">
-          <h2 className="font-bold text-slate-800 mb-3">할인 적용</h2>
-          <div className="flex gap-2">
-            <select
-              value={discount.type}
-              onChange={(e) => onChange({ ...discount, type: e.target.value })}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-            >
-              <option value="percent">정률 (%)</option>
-              <option value="amount">정액 (원)</option>
-            </select>
-            <Input
-              type="number"
-              value={discount.value}
-              onChange={(e) => onChange({ ...discount, value: e.target.value })}
-              placeholder="0"
-              className="flex-1"
-            />
-          </div>
-        </Card>
-      )
-    }
-
-    // ========================================
-    // 🧩 결과 패널 (각자 부담액 + 검산)
-    // ========================================
-
-    function ResultPanel({ result }) {
-      const { total, discountAmount, afterDiscount, shares, splitMode, payer, transfers, payerReceives } = result
-      return (
-        <Card className="p-5 bg-gradient-to-br from-indigo-600 to-indigo-500 text-white">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-bold text-lg">정산 결과</h2>
-            <Badge className="bg-white/20 text-white">{splitMode === 'equal' ? 'N분의 1 균등' : '각자 먹은 만큼'}</Badge>
-          </div>
-
-          {/* 인원별 부담액 */}
-          <ul className="space-y-2 mb-4">
-            {shares.map((s) => (
-              <li key={s.id} className="flex items-center justify-between">
-                <span className="opacity-90">{s.name}{payer && s.id === payer.id && <span className="ml-1 text-xs opacity-70">(결제자)</span>}</span>
-                <span className="font-bold tabular-nums text-lg">{formatWon(s.pay)}</span>
-              </li>
-            ))}
-            {shares.length === 0 && <li className="opacity-80 text-sm">인원과 메뉴를 입력하면 계산됩니다.</li>}
-          </ul>
-
-          {/* 결제자 송금 정산 */}
-          {payer && transfers.length > 0 && (
-            <div className="bg-white/10 rounded-xl p-3 mb-4">
-              <p className="text-xs opacity-80 mb-2">💳 <b>{payer.name}</b>님이 결제 — 아래 금액을 보내주세요</p>
-              <ul className="space-y-1.5">
-                {transfers.map((t) => (
-                  <li key={t.id} className="flex items-center justify-between text-sm">
-                    <span className="opacity-90">{t.from} → {t.to}</span>
-                    <span className="font-bold tabular-nums">{formatWon(t.amount)} 보내기</span>
-                  </li>
-                ))}
-              </ul>
-              <div className="flex justify-between text-xs opacity-80 mt-2 pt-2 border-t border-white/20">
-                <span>{payer.name}님이 돌려받을 금액</span>
-                <span className="tabular-nums">{formatWon(payerReceives)}</span>
-              </div>
-            </div>
-          )}
-
-          <div className="border-t border-white/30 pt-3 space-y-1 text-sm">
-            <div className="flex justify-between opacity-90"><span>전체 합계</span><span className="tabular-nums">{formatWon(total)}</span></div>
-            <div className="flex justify-between opacity-90"><span>할인액</span><span className="tabular-nums">- {formatWon(discountAmount)}</span></div>
-            <div className="flex justify-between font-bold text-base"><span>할인 후 총액</span><span className="tabular-nums">{formatWon(afterDiscount)}</span></div>
-          </div>
-        </Card>
-      )
-    }
-
-    // ========================================
-    // 🧩 정산 옵션 (정산 방식 토글 + 결제자 선택)
-    // ========================================
-
-    function SettleOptions({ splitMode, onChangeMode, people, payerId, onChangePayer }) {
-      const modes = [
-        { key: 'each', label: '각자 먹은 만큼' },
-        { key: 'equal', label: 'N분의 1' }
-      ]
-      return (
-        <Card className="p-4">
-          <h2 className="font-bold text-slate-800 mb-3">정산 방식</h2>
-          {/* 세그먼트 토글 */}
-          <div className="flex gap-1 bg-slate-100 rounded-lg p-1 mb-4">
-            {modes.map((m) => (
-              <button
-                key={m.key}
-                onClick={() => onChangeMode(m.key)}
-                className={`flex-1 text-sm font-semibold rounded-md py-1.5 transition ${splitMode === m.key ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-          {/* 결제자 선택 */}
-          <span className="block text-xs font-medium text-slate-500 mb-1">결제자 (한 명이 대표로 결제한 경우)</span>
-          <select
-            value={payerId == null ? '' : String(payerId)}
-            onChange={(e) => onChangePayer(e.target.value === '' ? null : Number(e.target.value))}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-          >
-            <option value="">없음 (각자 부담액만 표시)</option>
-            {people.map((p) => (
-              <option key={p.id} value={String(p.id)}>{p.name}</option>
-            ))}
-          </select>
-        </Card>
-      )
-    }
-
-    // ========================================
-    // 🚀 App — 상태 관리 + 핵심 계산 로직
-    // ========================================
-
-    // 초기 샘플 데이터 (한 번만 생성 — id 고정)
-    const INITIAL_PEOPLE = [
-      { id: makeId(), name: '현재', items: [
-        { id: makeId(), name: '파스타', price: 18000 },
-        { id: makeId(), name: '콜라', price: 3000 }
-      ] },
-      { id: makeId(), name: '민수', items: [
-        { id: makeId(), name: '스테이크', price: 32000 },
-        { id: makeId(), name: '맥주', price: 6000 }
-      ] }
-    ]
-
-    function App() {
-      // 인원 배열 (각 인원은 먹은 메뉴 배열을 가짐)
-      const [people, setPeople] = useState(INITIAL_PEOPLE)
-      const [discount, setDiscount] = useState({ type: 'percent', value: '10' })
-      const [splitMode, setSplitMode] = useState('each') // 'each'=각자 먹은 만큼, 'equal'=N분의 1 균등
-      const [payerId, setPayerId] = useState(INITIAL_PEOPLE[0].id) // 결제자(대표로 낸 사람), 없으면 null
-
-      // --- 인원 조작 ---
-      function addPerson() {
-        setPeople([...people, { id: makeId(), name: `인원 ${people.length + 1}`, items: [] }])
-      }
-      function renamePerson(personId, name) {
-        setPeople(people.map((p) => p.id === personId ? { ...p, name } : p))
-      }
-      function removePerson(personId) {
-        setPeople(people.filter((p) => p.id !== personId))
-      }
-
-      // --- 메뉴 조작 ---
-      function addItem(personId, name, price) {
-        setPeople(people.map((p) => p.id === personId
-          ? { ...p, items: [...p.items, { id: makeId(), name, price }] }
-          : p))
-      }
-      function removeItem(personId, itemId) {
-        setPeople(people.map((p) => p.id === personId
-          ? { ...p, items: p.items.filter((it) => it.id !== itemId) }
-          : p))
-      }
-
-      // --- 핵심 계산 (배열/반복문/reduce) ---
-      const result = useMemo(() => {
-        const n = people.length
-        // 1) 인원별 소계 = 그 사람이 먹은 메뉴 가격 합
-        const subtotals = people.map((p) => p.items.reduce((sum, it) => sum + it.price, 0))
-        // 2) 전체 합계
-        const total = subtotals.reduce((sum, v) => sum + v, 0)
-        // 3) 할인액 계산 (정률/정액, 음수·초과 방지)
-        const dv = parseFloat(discount.value) || 0
-        let discountAmount = discount.type === 'percent'
-          ? Math.round(total * dv / 100)
-          : dv
-        discountAmount = Math.max(0, Math.min(discountAmount, total))
-        const afterDiscount = total - discountAmount
-
-        // 4) 각자 부담액 — 정산 방식(splitMode)에 따라 분배
-        //    equal: 할인 후 총액을 인원수로 균등 분할
-        //    each : 각자 먹은 소계 비율대로 분배
-        //    단수차이는 마지막 인원이 흡수해 합이 정확히 일치하도록 검산
-        let allocated = 0
-        const shares = people.map((p, i) => {
-          let pay
-          if (splitMode === 'equal') {
-            pay = n > 0 ? Math.round(afterDiscount / n) : 0
-          } else {
-            pay = total > 0 ? Math.round(afterDiscount * subtotals[i] / total) : 0
-          }
-          allocated += pay
-          return { id: p.id, name: p.name, subtotal: subtotals[i], pay }
-        })
-        if (shares.length > 0) {
-          shares[shares.length - 1].pay += afterDiscount - allocated // 반올림 오차 보정
-        }
-
-        // 5) 결제자 정산 — 결제자가 전액을 냈다고 보고, 나머지가 각자 부담액만큼 송금
-        const payer = shares.find((s) => s.id === payerId) || null
-        const transfers = payer
-          ? shares.filter((s) => s.id !== payer.id && s.pay > 0)
-              .map((s) => ({ id: s.id, from: s.name, to: payer.name, amount: s.pay }))
-          : []
-        const payerReceives = payer ? afterDiscount - payer.pay : 0
-
-        return { subtotals, total, discountAmount, afterDiscount, shares, splitMode, payer, transfers, payerReceives }
-      }, [people, discount, splitMode, payerId])
-
-      return (
-        <div className="max-w-3xl mx-auto px-4 py-8">
-          <header className="mb-6">
-            <h1 className="text-2xl font-extrabold text-slate-800">💸 더치페이 계산기</h1>
-            <p className="text-sm text-slate-500 mt-1">인원별 메뉴·할인을 반영해 각자 낼 금액을 계산합니다. N분의 1 균등 / 각자 먹은 만큼 정산, 결제자 송금 정산까지.</p>
-          </header>
-
-          <div className="grid md:grid-cols-2 gap-4 items-start">
-            {/* 왼쪽: 입력 영역 */}
-            <div className="space-y-4">
-              {people.map((p, i) => (
-                <PersonCard
-                  key={p.id}
-                  person={p}
-                  subtotal={result.subtotals[i]}
-                  onRename={renamePerson}
-                  onRemove={removePerson}
-                  onAddItem={addItem}
-                  onRemoveItem={removeItem}
-                />
-              ))}
-              <Button variant="ghost" onClick={addPerson} className="w-full border border-dashed border-indigo-300 py-3">+ 인원 추가</Button>
-            </div>
-
-            {/* 오른쪽: 정산 방식 + 할인 + 결과 (sticky) */}
-            <div className="space-y-4 md:sticky md:top-8">
-              <SettleOptions
-                splitMode={splitMode}
-                onChangeMode={setSplitMode}
-                people={people}
-                payerId={payerId}
-                onChangePayer={setPayerId}
-              />
-              <DiscountControl discount={discount} onChange={setDiscount} />
-              <ResultPanel result={result} />
-            </div>
           </div>
         </div>
       )
     }
 
     // ========================================
-    // 렌더링
+    // 🧩 가게 카드 (이름·결제자·할인·참여자 메뉴)
     // ========================================
+
+    function PlaceCard({ place, people, result, onRename, onSetPayer, onSetDiscount, onRemove, onAddMember, onRemoveMember, onAddItem, onRemoveItem }) {
+      const payMap = {}
+      result.shares.forEach((s) => { payMap[s.personId] = s.pay })
+      const memberIds = place.members.map((m) => m.personId)
+      const candidates = people.filter((p) => !memberIds.includes(p.id)) // 아직 참여 안 한 명부 인원
+
+      return (
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <input
+              value={place.name}
+              onChange={(e) => onRename(place.id, e.target.value)}
+              placeholder="가게명"
+              className="flex-1 font-bold text-slate-800 bg-transparent border-b border-slate-200 focus:border-indigo-400 focus:outline-none py-1"
+            />
+            <Badge className="bg-indigo-50 text-indigo-600">합계 {formatWon(result.total)}</Badge>
+            <Button variant="danger" size="sm" onClick={() => onRemove(place.id)}>가게 삭제</Button>
+          </div>
+
+          {/* 결제자 + 할인 */}
+          <div className="flex flex-wrap gap-2">
+            <label className="flex-1 min-w-[140px]">
+              <span className="block text-xs font-medium text-slate-500 mb-1">결제자</span>
+              <select
+                value={place.payerId == null ? '' : String(place.payerId)}
+                onChange={(e) => onSetPayer(place.id, e.target.value === '' ? null : Number(e.target.value))}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              >
+                <option value="">결제자 선택</option>
+                {place.members.map((m) => (
+                  <option key={m.personId} value={String(m.personId)}>{nameOf(people, m.personId)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="w-40">
+              <span className="block text-xs font-medium text-slate-500 mb-1">할인</span>
+              <div className="flex gap-1">
+                <select
+                  value={place.discount.type}
+                  onChange={(e) => onSetDiscount(place.id, { ...place.discount, type: e.target.value })}
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                >
+                  <option value="percent">%</option>
+                  <option value="amount">원</option>
+                </select>
+                <input
+                  type="number"
+                  value={place.discount.value}
+                  onChange={(e) => onSetDiscount(place.id, { ...place.discount, value: e.target.value })}
+                  placeholder="0"
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                />
+              </div>
+            </label>
+          </div>
+
+          {/* 참여자별 메뉴 */}
+          <div className="space-y-2">
+            {place.members.map((m) => (
+              <MemberMenu
+                key={m.personId}
+                placeId={place.id}
+                member={m}
+                name={nameOf(people, m.personId)}
+                pay={payMap[m.personId] || 0}
+                onAddItem={onAddItem}
+                onRemoveItem={onRemoveItem}
+                onRemoveMember={onRemoveMember}
+              />
+            ))}
+          </div>
+
+          {/* 참여자 추가 */}
+          {candidates.length > 0 && (
+            <select
+              value=""
+              onChange={(e) => { if (e.target.value) onAddMember(place.id, Number(e.target.value)) }}
+              className="w-full rounded-lg border border-dashed border-indigo-300 text-indigo-600 px-3 py-2 text-sm focus:outline-none"
+            >
+              <option value="">+ 이 가게에 참여자 추가</option>
+              {candidates.map((p) => (
+                <option key={p.id} value={String(p.id)}>{p.name}</option>
+              ))}
+            </select>
+          )}
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🧩 참여자 명부 (전역 인원)
+    // ========================================
+
+    function PeopleRoster({ people, onAdd, onRemove }) {
+      const [name, setName] = useState('')
+      function handleAdd() {
+        if (!name.trim()) return
+        onAdd(name.trim())
+        setName('')
+      }
+      return (
+        <Card className="p-4">
+          <h2 className="font-bold text-slate-800 mb-3">참여자</h2>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {people.map((p) => (
+              <span key={p.id} className="inline-flex items-center gap-1 bg-slate-100 rounded-full pl-3 pr-2 py-1 text-sm">
+                {p.name}
+                <button onClick={() => onRemove(p.id)} className="text-slate-400 hover:text-red-500">✕</button>
+              </span>
+            ))}
+            {people.length === 0 && <span className="text-sm text-slate-400">참여자를 추가하세요</span>}
+          </div>
+          <div className="flex gap-2">
+            <Input placeholder="이름" value={name} onChange={(e) => setName(e.target.value)} className="flex-1"
+              onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }} />
+            <Button onClick={handleAdd} className="shrink-0">추가</Button>
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🧩 정산 방식 토글
+    // ========================================
+
+    function SplitModeToggle({ splitMode, onChange }) {
+      const modes = [{ key: 'each', label: '각자 먹은 만큼' }, { key: 'equal', label: 'N분의 1' }]
+      return (
+        <div className="flex gap-1 bg-white/20 rounded-lg p-1">
+          {modes.map((m) => (
+            <button key={m.key} onClick={() => onChange(m.key)}
+              className={`flex-1 text-sm font-semibold rounded-md py-1.5 transition ${splitMode === m.key ? 'bg-white text-indigo-600 shadow-sm' : 'text-white/90'}`}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 송금 한 줄 (펼침 + 이체 체크)
+    // ========================================
+
+    function TransferRow({ transfer, people, settled, onToggle }) {
+      const [open, setOpen] = useState(false)
+      const key = `${transfer.fromId}->${transfer.toId}`
+      const done = settled.has(key)
+      return (
+        <li className={`rounded-xl p-3 ${done ? 'bg-white/5' : 'bg-white/10'}`}>
+          <div className="flex items-center gap-3">
+            <input type="checkbox" checked={done} onChange={() => onToggle(key)} className="w-4 h-4 accent-emerald-400" />
+            <button onClick={() => setOpen(!open)} className={`flex-1 text-left ${done ? 'line-through opacity-50' : ''}`}>
+              <span className="opacity-90">{nameOf(people, transfer.fromId)} → {nameOf(people, transfer.toId)}</span>
+              <span className="ml-1 text-xs opacity-60">{open ? '▲' : '▼'}</span>
+            </button>
+            <span className={`font-bold tabular-nums text-lg ${done ? 'line-through opacity-50' : ''}`}>{formatWon(transfer.amount)}</span>
+          </div>
+          {open && (
+            <ul className="mt-2 ml-7 space-y-1 text-xs opacity-80">
+              {transfer.breakdown.map((b, i) => (
+                <li key={i} className="flex justify-between">
+                  <span>{b.place} · {nameOf(people, b.fromId)} → {nameOf(people, b.toId)}</span>
+                  <span className="tabular-nums">{formatWon(b.amount)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </li>
+      )
+    }
+
+    // ========================================
+    // 🔝 정산 결과 헤더 (가장 중요 — 최상단)
+    // ========================================
+
+    function SettlementHeader({ settlement, people, splitMode, onChangeMode, settled, onToggle }) {
+      const { transfers, grandTotal, grandDiscount, grandAfter } = settlement
+      const pending = transfers.filter((t) => !settled.has(`${t.fromId}->${t.toId}`))
+      const doneList = transfers.filter((t) => settled.has(`${t.fromId}->${t.toId}`))
+      const ordered = [...pending, ...doneList] // 미이체 먼저
+
+      return (
+        <Card className="p-5 bg-gradient-to-br from-indigo-600 to-indigo-500 text-white">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-extrabold text-xl">💸 정산 결과</h2>
+            <Badge className="bg-white/20 text-white">미이체 {pending.length}건</Badge>
+          </div>
+
+          <div className="mb-4"><SplitModeToggle splitMode={splitMode} onChange={onChangeMode} /></div>
+
+          <ul className="space-y-2 mb-4">
+            {ordered.map((t) => (
+              <TransferRow key={`${t.fromId}->${t.toId}`} transfer={t} people={people} settled={settled} onToggle={onToggle} />
+            ))}
+            {transfers.length === 0 && <li className="opacity-80 text-sm">가게·참여자·결제자를 입력하면 송금 정산이 계산됩니다.</li>}
+            {transfers.length > 0 && pending.length === 0 && <li className="text-emerald-200 font-semibold text-sm">🎉 모든 송금이 완료되었습니다.</li>}
+          </ul>
+
+          <div className="border-t border-white/30 pt-3 space-y-1 text-sm">
+            <div className="flex justify-between opacity-90"><span>전체 합계</span><span className="tabular-nums">{formatWon(grandTotal)}</span></div>
+            <div className="flex justify-between opacity-90"><span>총 할인</span><span className="tabular-nums">- {formatWon(grandDiscount)}</span></div>
+            <div className="flex justify-between font-bold text-base"><span>할인 후 총액</span><span className="tabular-nums">{formatWon(grandAfter)}</span></div>
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 초기 샘플 데이터 (한 번만 생성 — id 고정)
+    // ========================================
+
+    const P_HJ = makeId(), P_MS = makeId(), P_YH = makeId()
+    const INITIAL_PEOPLE = [
+      { id: P_HJ, name: '현재' },
+      { id: P_MS, name: '민수' },
+      { id: P_YH, name: '영희' }
+    ]
+    const INITIAL_PLACES = [
+      { id: makeId(), name: '파스타집', payerId: P_HJ, discount: { type: 'percent', value: '10' }, members: [
+        { personId: P_HJ, items: [{ id: makeId(), name: '파스타', price: 18000 }] },
+        { personId: P_MS, items: [{ id: makeId(), name: '스테이크', price: 32000 }] },
+        { personId: P_YH, items: [{ id: makeId(), name: '샐러드', price: 12000 }] }
+      ] },
+      { id: makeId(), name: '치킨집', payerId: P_MS, discount: { type: 'percent', value: '0' }, members: [
+        { personId: P_MS, items: [{ id: makeId(), name: '치킨', price: 20000 }] },
+        { personId: P_YH, items: [{ id: makeId(), name: '맥주', price: 6000 }] },
+        { personId: P_HJ, items: [{ id: makeId(), name: '콜라', price: 3000 }] }
+      ] }
+    ]
+    const INITIAL_SETTLED = [`${P_YH}->${P_MS}`] // 영희→민수는 이체 완료(샘플)
+
+    // ========================================
+    // 🚀 App
+    // ========================================
+
+    function App() {
+      const [people, setPeople] = useState(INITIAL_PEOPLE)
+      const [places, setPlaces] = useState(INITIAL_PLACES)
+      const [splitMode, setSplitMode] = useState('each')
+      const [settled, setSettled] = useState(() => new Set(INITIAL_SETTLED))
+
+      // --- 참여자(명부) ---
+      function addPerson(name) {
+        setPeople([...people, { id: makeId(), name }])
+      }
+      function removePerson(personId) {
+        setPeople(people.filter((p) => p.id !== personId))
+        // 모든 가게에서 제거 + 결제자였으면 해제
+        setPlaces(places.map((pl) => ({
+          ...pl,
+          payerId: pl.payerId === personId ? null : pl.payerId,
+          members: pl.members.filter((m) => m.personId !== personId)
+        })))
+      }
+
+      // --- 가게 ---
+      function addPlace() {
+        setPlaces([...places, { id: makeId(), name: '', payerId: null, discount: { type: 'percent', value: '0' }, members: [] }])
+      }
+      function patchPlace(placeId, patch) {
+        setPlaces(places.map((pl) => pl.id === placeId ? { ...pl, ...patch } : pl))
+      }
+      function renamePlace(placeId, name) { patchPlace(placeId, { name }) }
+      function setPayer(placeId, payerId) { patchPlace(placeId, { payerId }) }
+      function setDiscount(placeId, discount) { patchPlace(placeId, { discount }) }
+      function removePlace(placeId) { setPlaces(places.filter((pl) => pl.id !== placeId)) }
+
+      function addMember(placeId, personId) {
+        setPlaces(places.map((pl) => pl.id === placeId
+          ? { ...pl, members: [...pl.members, { personId, items: [] }] }
+          : pl))
+      }
+      function removeMember(placeId, personId) {
+        setPlaces(places.map((pl) => pl.id === placeId
+          ? { ...pl, payerId: pl.payerId === personId ? null : pl.payerId, members: pl.members.filter((m) => m.personId !== personId) }
+          : pl))
+      }
+      function addItem(placeId, personId, name, price) {
+        setPlaces(places.map((pl) => pl.id === placeId
+          ? { ...pl, members: pl.members.map((m) => m.personId === personId ? { ...m, items: [...m.items, { id: makeId(), name, price }] } : m) }
+          : pl))
+      }
+      function removeItem(placeId, personId, itemId) {
+        setPlaces(places.map((pl) => pl.id === placeId
+          ? { ...pl, members: pl.members.map((m) => m.personId === personId ? { ...m, items: m.items.filter((it) => it.id !== itemId) } : m) }
+          : pl))
+      }
+
+      // --- 이체 토글 ---
+      function toggleSettled(key) {
+        const next = new Set(settled)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        setSettled(next)
+      }
+
+      // --- 정산 계산 (가게별 분담 → 채무 → 사람쌍 상계) ---
+      const settlement = useMemo(() => {
+        let grandTotal = 0, grandDiscount = 0, grandAfter = 0
+        const contribs = [] // {fromId, toId, place, amount}
+
+        const placeResults = places.map((place) => {
+          const r = calcPlace(place, splitMode)
+          grandTotal += r.total
+          grandDiscount += r.discountAmount
+          grandAfter += r.afterDiscount
+          const payerId = place.payerId
+          const payerIsMember = place.members.some((m) => m.personId === payerId)
+          if (payerIsMember) {
+            r.shares.forEach((s) => {
+              if (s.personId !== payerId && s.pay > 0) {
+                contribs.push({ fromId: s.personId, toId: payerId, place: place.name || '이름없는 가게', amount: s.pay })
+              }
+            })
+          }
+          return { place, result: r }
+        })
+
+        // 사람쌍별 상계 (canonical: 작은 id = a, 큰 id = b)
+        const pairs = {}
+        contribs.forEach((c) => {
+          const a = Math.min(c.fromId, c.toId)
+          const b = Math.max(c.fromId, c.toId)
+          const k = `${a}_${b}`
+          if (!pairs[k]) pairs[k] = { a, b, net: 0, breakdown: [] }
+          const sign = c.fromId === a ? 1 : -1 // a→b 방향을 +로
+          pairs[k].net += sign * c.amount
+          pairs[k].breakdown.push({ place: c.place, fromId: c.fromId, toId: c.toId, amount: c.amount })
+        })
+        const transfers = Object.values(pairs).map((p) => {
+          if (p.net === 0) return null
+          const fromId = p.net > 0 ? p.a : p.b
+          const toId = p.net > 0 ? p.b : p.a
+          return { fromId, toId, amount: Math.abs(p.net), breakdown: p.breakdown }
+        }).filter(Boolean)
+
+        return { placeResults, transfers, grandTotal, grandDiscount, grandAfter }
+      }, [places, splitMode])
+
+      const resultByPlace = {}
+      settlement.placeResults.forEach((pr) => { resultByPlace[pr.place.id] = pr.result })
+
+      return (
+        <div className="max-w-2xl mx-auto px-4 py-8 space-y-4">
+          <header>
+            <h1 className="text-2xl font-extrabold text-slate-800">💸 더치페이 계산기</h1>
+            <p className="text-sm text-slate-500 mt-1">가게마다 결제자·할인을 따로 두고, 여러 자리를 한 번에 정산합니다. 누가 누구에게 얼마 보낼지 상계해 보여줘요.</p>
+          </header>
+
+          {/* 🔝 정산 결과 (최상단) */}
+          <SettlementHeader
+            settlement={settlement}
+            people={people}
+            splitMode={splitMode}
+            onChangeMode={setSplitMode}
+            settled={settled}
+            onToggle={toggleSettled}
+          />
+
+          {/* 참여자 명부 */}
+          <PeopleRoster people={people} onAdd={addPerson} onRemove={removePerson} />
+
+          {/* 가게 목록 */}
+          <div className="space-y-4">
+            {places.map((place) => (
+              <PlaceCard
+                key={place.id}
+                place={place}
+                people={people}
+                result={resultByPlace[place.id]}
+                onRename={renamePlace}
+                onSetPayer={setPayer}
+                onSetDiscount={setDiscount}
+                onRemove={removePlace}
+                onAddMember={addMember}
+                onRemoveMember={removeMember}
+                onAddItem={addItem}
+                onRemoveItem={removeItem}
+              />
+            ))}
+            <Button variant="ghost" onClick={addPlace} className="w-full border border-dashed border-indigo-300 py-3">+ 가게 추가</Button>
+          </div>
+        </div>
+      )
+    }
+
     ReactDOM.createRoot(document.getElementById('root')).render(<App />)
   </script>
 </body>
