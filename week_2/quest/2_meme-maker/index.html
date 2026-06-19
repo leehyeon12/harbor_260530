@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>짤 생성기 (밈 메이커)</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 (개발 버전 UMD) -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <!-- ReactDOM 18 (개발 버전 UMD) -->
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel Standalone (JSX 변환) -->
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <style>
+    /* 드래그 중 텍스트 선택 방지 */
+    .no-select { -webkit-user-select: none; user-select: none; }
+  </style>
+</head>
+<body class="bg-slate-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useMemo, useEffect } = React
+
+    // ───────────────────────── 유틸 함수 ─────────────────────────
+
+    // 고유 ID 생성
+    let idSeq = 0
+    const makeId = () => `t${++idSeq}`
+
+    // SVG 문자열을 data URI 로 변환 (샘플 배경용, CORS 안전)
+    const svgToDataUri = (svg) =>
+      'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+
+    // 샘플 배경 템플릿 (외부 이미지 없이 SVG 로 직접 생성 → 다운로드 시 tainting 없음)
+    const makeSample = (w, h, inner) =>
+      svgToDataUri(
+        `<svg xmlns='http://www.w3.org/2000/svg' width='${w}' height='${h}' viewBox='0 0 ${w} ${h}'>${inner}</svg>`
+      )
+
+    const SAMPLES = [
+      {
+        name: '노을 그라데이션',
+        w: 800, h: 800,
+        src: makeSample(800, 800, `
+          <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+            <stop offset='0' stop-color='#ff9966'/><stop offset='1' stop-color='#ff5e62'/>
+          </linearGradient></defs>
+          <rect width='800' height='800' fill='url(#g)'/>`)
+      },
+      {
+        name: '바다 그라데이션',
+        w: 800, h: 800,
+        src: makeSample(800, 800, `
+          <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+            <stop offset='0' stop-color='#36d1dc'/><stop offset='1' stop-color='#5b86e5'/>
+          </linearGradient></defs>
+          <rect width='800' height='800' fill='url(#g)'/>`)
+      },
+      {
+        name: '도트 패턴',
+        w: 800, h: 800,
+        src: makeSample(800, 800, `
+          <defs><pattern id='p' width='40' height='40' patternUnits='userSpaceOnUse'>
+            <rect width='40' height='40' fill='#1e293b'/>
+            <circle cx='20' cy='20' r='6' fill='#334155'/>
+          </pattern></defs>
+          <rect width='800' height='800' fill='url(#p)'/>`)
+      },
+      {
+        name: '단색 블랙',
+        w: 800, h: 800,
+        src: makeSample(800, 800, `<rect width='800' height='800' fill='#111827'/>`)
+      }
+    ]
+
+    // 새 텍스트 레이어 기본값 (클래식 밈 스타일)
+    const makeLayer = (text) => ({
+      id: makeId(),
+      text: text || '텍스트 입력',
+      xRatio: 0.5,
+      yRatio: 0.5,
+      sizeRatio: 0.09,   // 이미지 폭 대비 폰트 크기
+      color: '#ffffff',
+      strokeColor: '#000000',
+      strokeOn: true,
+      bold: true,
+      align: 'center',
+      shadowOn: false,        // 그림자
+      highlightOn: false,     // 형광펜(배경 박스)
+      highlightColor: '#facc15'
+    })
+
+    // 미리보기·캔버스 공통 비율 상수 (그림자 오프셋, 형광펜 여백)
+    const SHADOW_BLUR = 0.06
+    const SHADOW_OFFSET = 0.03
+    const HL_PAD_X = 0.12   // em (글자 크기 대비)
+    const HL_PAD_Y = 0.06
+
+    // ───────────────────── 디자인 시스템 컴포넌트 ─────────────────────
+
+    const Button = ({ variant = 'primary', className = '', ...props }) => {
+      const base = 'px-4 py-2 rounded-lg font-medium text-sm transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed'
+      const variants = {
+        primary: 'bg-indigo-600 text-white hover:bg-indigo-700',
+        secondary: 'bg-slate-200 text-slate-700 hover:bg-slate-300',
+        danger: 'bg-rose-500 text-white hover:bg-rose-600',
+        ghost: 'bg-transparent text-slate-500 hover:bg-slate-100'
+      }
+      return <button className={`${base} ${variants[variant]} ${className}`} {...props} />
+    }
+
+    const Field = ({ label, children }) => (
+      <label className='block'>
+        <span className='block text-xs font-medium text-slate-500 mb-1'>{label}</span>
+        {children}
+      </label>
+    )
+
+    // ───────────────────── 도메인 컴포넌트 ─────────────────────
+
+    // 이미지 위에 겹쳐 그리는 편집용 미리보기 + 드래그 처리
+    const PreviewStage = ({ image, layers, selectedId, onSelect, onMove, onFile }) => {
+      const stageRef = useRef(null)
+      const dragRef = useRef(null)
+      const [over, setOver] = useState(false)   // 파일 드래그 오버 상태
+
+      // 포인터 좌표 → 컨테이너 대비 비율
+      const toRatio = (clientX, clientY) => {
+        const rect = stageRef.current.getBoundingClientRect()
+        const x = (clientX - rect.left) / rect.width
+        const y = (clientY - rect.top) / rect.height
+        return {
+          x: Math.min(1, Math.max(0, x)),
+          y: Math.min(1, Math.max(0, y))
+        }
+      }
+
+      const handlePointerDown = (e, id) => {
+        e.preventDefault()
+        onSelect(id)
+        dragRef.current = id
+        e.currentTarget.setPointerCapture(e.pointerId)
+      }
+
+      const handlePointerMove = (e) => {
+        if (!dragRef.current) return
+        const { x, y } = toRatio(e.clientX, e.clientY)
+        onMove(dragRef.current, x, y)
+      }
+
+      const handlePointerUp = () => {
+        dragRef.current = null
+      }
+
+      // 파일 드래그앤드롭
+      const handleDragOver = (e) => { e.preventDefault(); setOver(true) }
+      const handleDragLeave = (e) => { e.preventDefault(); setOver(false) }
+      const handleDrop = (e) => {
+        e.preventDefault()
+        setOver(false)
+        const file = e.dataTransfer.files[0]
+        if (file) onFile(file)
+      }
+      const dropProps = { onDragOver: handleDragOver, onDragLeave: handleDragLeave, onDrop: handleDrop }
+
+      if (!image) {
+        return (
+          <div {...dropProps}
+            className={`aspect-square w-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-3 px-6 transition ${over ? 'border-indigo-400 bg-indigo-50' : 'border-slate-300 bg-white'}`}>
+            <span className='text-4xl'>🖼️</span>
+            <p className='font-semibold text-slate-500 text-sm'>이미지를 올려서 시작하세요</p>
+            <ol className='text-xs text-slate-400 text-left space-y-1'>
+              <li>① 이미지 올리기 (업로드 · 드래그앤드롭 · ⌘V 붙여넣기)</li>
+              <li>② 텍스트 추가</li>
+              <li>③ 끌어서 위치 잡기</li>
+              <li>④ PNG 다운로드</li>
+            </ol>
+          </div>
+        )
+      }
+
+      return (
+        <div
+          ref={stageRef}
+          {...dropProps}
+          className={`relative w-full overflow-hidden rounded-xl shadow-lg bg-slate-200 no-select transition ${over ? 'ring-4 ring-indigo-400' : ''}`}
+          style={{ aspectRatio: `${image.w} / ${image.h}`, containerType: 'inline-size' }}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+        >
+          <img src={image.src} alt='배경' className='absolute inset-0 w-full h-full object-contain pointer-events-none' />
+          {layers.map((l) => (
+            <div
+              key={l.id}
+              onPointerDown={(e) => handlePointerDown(e, l.id)}
+              className={`absolute cursor-move whitespace-pre leading-tight ${selectedId === l.id ? 'ring-2 ring-indigo-400 ring-offset-1' : ''}`}
+              style={{
+                left: `${l.xRatio * 100}%`,
+                top: `${l.yRatio * 100}%`,
+                transform: 'translate(-50%, -50%)',
+                color: l.color,
+                fontSize: `${l.sizeRatio * 100}cqw`,
+                fontWeight: l.bold ? 800 : 400,
+                textAlign: l.align,
+                fontFamily: 'Arial, sans-serif',
+                WebkitTextStroke: l.strokeOn ? `0.06em ${l.strokeColor}` : 'none',
+                paintOrder: 'stroke fill',
+                textShadow: l.shadowOn ? `${SHADOW_OFFSET}em ${SHADOW_OFFSET}em ${SHADOW_BLUR}em rgba(0,0,0,0.55)` : 'none'
+              }}
+            >
+              {l.highlightOn ? (
+                <span style={{
+                  backgroundColor: l.highlightColor,
+                  WebkitBoxDecorationBreak: 'clone',
+                  boxDecorationBreak: 'clone',
+                  padding: `${HL_PAD_Y}em ${HL_PAD_X}em`,
+                  borderRadius: '0.05em'
+                }}>{l.text}</span>
+              ) : l.text}
+            </div>
+          ))}
+        </div>
+      )
+    }
+
+    // 선택된 레이어 편집 패널
+    const LayerEditor = ({ layer, onChange, onDelete }) => {
+      if (!layer) {
+        return (
+          <p className='text-sm text-slate-400 px-1'>
+            텍스트를 추가하거나 선택하면 여기서 편집할 수 있어요.
+          </p>
+        )
+      }
+      const set = (patch) => onChange({ ...layer, ...patch })
+
+      return (
+        <div className='space-y-4'>
+          <Field label='텍스트 (줄바꿈 가능)'>
+            <textarea
+              value={layer.text}
+              onChange={(e) => set({ text: e.target.value })}
+              rows={2}
+              className='w-full px-3 py-2 rounded-lg border border-slate-300 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300'
+            />
+          </Field>
+
+          <Field label={`글자 크기 (${Math.round(layer.sizeRatio * 100)})`}>
+            <input
+              type='range' min='3' max='25' step='1'
+              value={Math.round(layer.sizeRatio * 100)}
+              onChange={(e) => set({ sizeRatio: Number(e.target.value) / 100 })}
+              className='w-full'
+            />
+          </Field>
+
+          <div className='grid grid-cols-2 gap-3'>
+            <Field label='글자색'>
+              <input type='color' value={layer.color}
+                onChange={(e) => set({ color: e.target.value })}
+                className='w-full h-9 rounded border border-slate-300 cursor-pointer' />
+            </Field>
+            <Field label='외곽선색'>
+              <input type='color' value={layer.strokeColor}
+                onChange={(e) => set({ strokeColor: e.target.value })}
+                disabled={!layer.strokeOn}
+                className='w-full h-9 rounded border border-slate-300 cursor-pointer disabled:opacity-40' />
+            </Field>
+          </div>
+
+          <div className='flex flex-wrap gap-2'>
+            <Button variant={layer.strokeOn ? 'primary' : 'secondary'}
+              onClick={() => set({ strokeOn: !layer.strokeOn })}>
+              외곽선 {layer.strokeOn ? 'ON' : 'OFF'}
+            </Button>
+            <Button variant={layer.bold ? 'primary' : 'secondary'}
+              onClick={() => set({ bold: !layer.bold })}>
+              굵게
+            </Button>
+            <Button variant={layer.shadowOn ? 'primary' : 'secondary'}
+              onClick={() => set({ shadowOn: !layer.shadowOn })}>
+              그림자
+            </Button>
+            <Button variant={layer.highlightOn ? 'primary' : 'secondary'}
+              onClick={() => set({ highlightOn: !layer.highlightOn })}>
+              형광펜
+            </Button>
+          </div>
+
+          {layer.highlightOn &&
+            <Field label='형광펜색'>
+              <input type='color' value={layer.highlightColor}
+                onChange={(e) => set({ highlightColor: e.target.value })}
+                className='w-full h-9 rounded border border-slate-300 cursor-pointer' />
+            </Field>}
+
+          <Field label='정렬'>
+            <div className='flex gap-2'>
+              {['left', 'center', 'right'].map((a) => (
+                <Button key={a} variant={layer.align === a ? 'primary' : 'secondary'}
+                  className='flex-1' onClick={() => set({ align: a })}>
+                  {a === 'left' ? '왼쪽' : a === 'center' ? '가운데' : '오른쪽'}
+                </Button>
+              ))}
+            </div>
+          </Field>
+
+          <Button variant='danger' className='w-full' onClick={() => onDelete(layer.id)}>
+            이 텍스트 삭제
+          </Button>
+        </div>
+      )
+    }
+
+    // ───────────────────────── App ─────────────────────────
+
+    const App = () => {
+      const [image, setImage] = useState(null)   // { src, w, h }
+      const [layers, setLayers] = useState([])
+      const [selectedId, setSelectedId] = useState(null)
+      const [toast, setToast] = useState('')
+      const fileRef = useRef(null)
+
+      const selectedLayer = useMemo(
+        () => layers.find((l) => l.id === selectedId) || null,
+        [layers, selectedId]
+      )
+
+      // 잠깐 떴다 사라지는 안내 메시지
+      const showToast = (msg) => {
+        setToast(msg)
+        setTimeout(() => setToast(''), 2000)
+      }
+
+      // 이미지 선택 (샘플 또는 업로드)
+      const pickImage = (src, w, h) => {
+        if (w && h) {
+          setImage({ src, w, h })
+          return
+        }
+        // 업로드 등 크기를 모를 때는 로드해서 자연 크기 측정
+        const img = new Image()
+        img.onload = () => setImage({ src, w: img.naturalWidth, h: img.naturalHeight })
+        img.src = src
+      }
+
+      // 파일(업로드·드롭·붙여넣기) 공통 로더
+      const loadImageFile = (file) => {
+        if (!file || !file.type.startsWith('image/')) return
+        const reader = new FileReader()
+        reader.onload = () => pickImage(reader.result)
+        reader.readAsDataURL(file)
+      }
+
+      const handleUpload = (e) => {
+        loadImageFile(e.target.files[0])
+        e.target.value = ''   // 같은 파일 재선택 허용
+      }
+
+      // 클립보드 이미지 붙여넣기(⌘V): 웹 이미지 복사 후 바로 배경 삽입
+      useEffect(() => {
+        const onPaste = (e) => {
+          const items = (e.clipboardData && e.clipboardData.items) || []
+          for (const it of items) {
+            if (it.type.startsWith('image/')) {
+              loadImageFile(it.getAsFile())
+              showToast('이미지를 붙여넣었어요 ✓')
+              break
+            }
+          }
+        }
+        window.addEventListener('paste', onPaste)
+        return () => window.removeEventListener('paste', onPaste)
+      }, [])
+
+      // Delete/Backspace 로 선택 텍스트 삭제 (입력 중이 아닐 때만)
+      useEffect(() => {
+        const onKey = (e) => {
+          if (e.key !== 'Delete' && e.key !== 'Backspace') return
+          const tag = document.activeElement && document.activeElement.tagName
+          if (tag === 'INPUT' || tag === 'TEXTAREA') return
+          if (!selectedId) return
+          e.preventDefault()
+          deleteLayer(selectedId)
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [selectedId])
+
+      const addLayer = () => {
+        const layer = makeLayer()
+        setLayers((prev) => [...prev, layer])
+        setSelectedId(layer.id)
+      }
+
+      const updateLayer = (next) =>
+        setLayers((prev) => prev.map((l) => (l.id === next.id ? next : l)))
+
+      const moveLayer = (id, x, y) =>
+        setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, xRatio: x, yRatio: y } : l)))
+
+      const deleteLayer = (id) => {
+        setLayers((prev) => prev.filter((l) => l.id !== id))
+        setSelectedId(null)
+      }
+
+      // 전체 초기화 (이미지 + 레이어 리셋)
+      const resetAll = () => {
+        setImage(null)
+        setLayers([])
+        setSelectedId(null)
+      }
+
+      // 핵심: 원본 해상도 캔버스에 배경 + 텍스트를 그려 PNG 다운로드
+      const handleDownload = () => {
+        if (!image) return
+        const canvas = document.createElement('canvas')
+        canvas.width = image.w
+        canvas.height = image.h
+        const ctx = canvas.getContext('2d')
+
+        const bg = new Image()
+        bg.onload = () => {
+          ctx.drawImage(bg, 0, 0, image.w, image.h)
+
+          layers.forEach((l) => {
+            const fontSize = l.sizeRatio * image.w
+            ctx.font = `${l.bold ? '800' : '400'} ${fontSize}px Arial, sans-serif`
+            ctx.textAlign = l.align
+            ctx.textBaseline = 'middle'
+            ctx.lineJoin = 'round'
+
+            const lines = l.text.split('\n')
+            const lineHeight = fontSize * 1.1
+            const cx = l.xRatio * image.w
+            // 여러 줄을 세로 중앙 정렬
+            const startY = l.yRatio * image.h - (lines.length - 1) * lineHeight / 2
+
+            lines.forEach((line, i) => {
+              const y = startY + i * lineHeight
+
+              // 그림자 초기화
+              ctx.shadowColor = 'transparent'
+              ctx.shadowBlur = 0
+              ctx.shadowOffsetX = 0
+              ctx.shadowOffsetY = 0
+
+              // 형광펜 배경 박스 (텍스트 뒤, 그림자 없이)
+              if (l.highlightOn) {
+                const tw = ctx.measureText(line).width
+                const padX = fontSize * HL_PAD_X
+                const padY = fontSize * HL_PAD_Y
+                const boxW = tw + padX * 2
+                const boxH = fontSize + padY * 2
+                // textAlign 기준으로 박스 x 위치 보정
+                let boxX = cx - padX
+                if (l.align === 'center') boxX = cx - tw / 2 - padX
+                else if (l.align === 'right') boxX = cx - tw - padX
+                ctx.fillStyle = l.highlightColor
+                ctx.fillRect(boxX, y - boxH / 2, boxW, boxH)
+              }
+
+              // 그림자 (글자에만 적용)
+              if (l.shadowOn) {
+                ctx.shadowColor = 'rgba(0,0,0,0.55)'
+                ctx.shadowBlur = fontSize * SHADOW_BLUR
+                ctx.shadowOffsetX = fontSize * SHADOW_OFFSET
+                ctx.shadowOffsetY = fontSize * SHADOW_OFFSET
+              }
+
+              if (l.strokeOn) {
+                ctx.lineWidth = fontSize * 0.12
+                ctx.strokeStyle = l.strokeColor
+                ctx.strokeText(line, cx, y)
+                ctx.shadowColor = 'transparent'   // 채움에 그림자 중복 방지
+              }
+              ctx.fillStyle = l.color
+              ctx.fillText(line, cx, y)
+            })
+          })
+
+          // Blob 방식 저장 (사파리에서도 클릭 한 번에 다운로드)
+          canvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `meme-${Date.now()}.png`
+            a.click()
+            URL.revokeObjectURL(url)
+            showToast('저장했어요 ✓')
+          }, 'image/png')
+        }
+        bg.src = image.src
+      }
+
+      return (
+        <div className='min-h-screen py-8 px-4'>
+          <div className='max-w-5xl mx-auto'>
+            <header className='mb-6 text-center'>
+              <h1 className='text-3xl font-extrabold text-slate-800'>🖼️ 짤 생성기</h1>
+              <p className='text-slate-500 mt-1 text-sm'>이미지 위에 텍스트를 끌어다 놓고 PNG로 저장하세요</p>
+            </header>
+
+            <div className='grid md:grid-cols-2 gap-6'>
+              {/* 왼쪽: 미리보기 */}
+              <div>
+                <PreviewStage
+                  image={image}
+                  layers={layers}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  onMove={moveLayer}
+                  onFile={loadImageFile}
+                />
+                <div className='mt-3 flex gap-2'>
+                  <Button className='flex-1' onClick={addLayer} disabled={!image}>+ 텍스트 추가</Button>
+                  <Button variant='secondary' className='flex-1' onClick={handleDownload} disabled={!image}>
+                    ⬇ PNG 다운로드
+                  </Button>
+                </div>
+                <Button variant='ghost' className='w-full mt-2' onClick={resetAll} disabled={!image && layers.length === 0}>
+                  전체 초기화
+                </Button>
+              </div>
+
+              {/* 오른쪽: 컨트롤 */}
+              <div className='space-y-5'>
+                {/* 이미지 소스 */}
+                <section className='bg-white rounded-xl p-4 shadow-sm'>
+                  <h2 className='text-sm font-bold text-slate-700 mb-3'>1. 배경 이미지</h2>
+                  <Button variant='secondary' className='w-full'
+                    onClick={() => fileRef.current.click()}>
+                    📁 내 이미지 업로드
+                  </Button>
+                  <p className='text-[11px] text-slate-400 mt-1 mb-3'>
+                    미리보기로 끌어다 놓거나 ⌘V로 붙여넣어도 돼요
+                  </p>
+                  <input ref={fileRef} type='file' accept='image/*' onChange={handleUpload} className='hidden' />
+                  <p className='text-xs text-slate-400 mb-2'>또는 샘플 템플릿</p>
+                  <div className='grid grid-cols-4 gap-2'>
+                    {SAMPLES.map((s) => (
+                      <button key={s.name} onClick={() => pickImage(s.src, s.w, s.h)}
+                        title={s.name}
+                        className='aspect-square rounded-lg overflow-hidden border border-slate-200 hover:ring-2 hover:ring-indigo-300 transition'>
+                        <img src={s.src} alt={s.name} className='w-full h-full object-cover' />
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                {/* 텍스트 편집 */}
+                <section className='bg-white rounded-xl p-4 shadow-sm'>
+                  <div className='flex items-center justify-between mb-3'>
+                    <h2 className='text-sm font-bold text-slate-700'>2. 텍스트 편집</h2>
+                    {layers.length > 0 &&
+                      <span className='text-xs text-slate-400'>{layers.length}개 레이어</span>}
+                  </div>
+                  <LayerEditor layer={selectedLayer} onChange={updateLayer} onDelete={deleteLayer} />
+                </section>
+              </div>
+            </div>
+
+            <footer className='mt-8 text-center text-xs text-slate-400'>
+              하버스쿨 week_2 퀘스트 · [Transform] 짤 생성기 (밈 메이커)
+            </footer>
+          </div>
+
+          {/* 다운로드/붙여넣기 피드백 토스트 */}
+          {toast &&
+            <div className='fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-800 text-white text-sm px-4 py-2 rounded-full shadow-lg z-50'>
+              {toast}
+            </div>}
+        </div>
+      )
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
