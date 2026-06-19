@@ -28,14 +28,13 @@
       return Math.round(amount).toLocaleString('ko-KR') + '원'
     }
 
-    // 명부에서 이름 찾기
     function nameOf(people, id) {
       const p = people.find((x) => x.id === id)
       return p ? p.name : '?'
     }
 
     // ========================================
-    // 🎨 디자인 시스템 컴포넌트 (순수 표현용)
+    // 🎨 디자인 시스템 컴포넌트
     // ========================================
 
     function Button({ variant = 'primary', size = 'md', onClick, disabled, className = '', children }) {
@@ -70,6 +69,24 @@
       )
     }
 
+    // 금액 입력 (천단위 콤마 표시, 저장은 숫자 문자열)
+    function MoneyInput({ label, value, onChange, placeholder, className = '', ...rest }) {
+      const display = value === '' || value == null ? '' : Number(value).toLocaleString('ko-KR')
+      return (
+        <label className={`block ${className}`}>
+          {label && <span className="block text-xs font-medium text-slate-500 mb-1">{label}</span>}
+          <input
+            type="text" inputMode="numeric"
+            value={display}
+            onChange={(e) => onChange(e.target.value.replace(/[^0-9]/g, ''))}
+            placeholder={placeholder}
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            {...rest}
+          />
+        </label>
+      )
+    }
+
     function Card({ className = '', children }) {
       return <div className={`bg-white rounded-2xl shadow-sm border border-slate-100 ${className}`}>{children}</div>
     }
@@ -78,185 +95,298 @@
       return <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-semibold ${className}`}>{children}</span>
     }
 
+    // 세그먼트 토글 (옵션 2개)
+    function Segment({ value, options, onChange, dark = false }) {
+      return (
+        <div className={`flex gap-1 rounded-lg p-1 ${dark ? 'bg-white/20' : 'bg-slate-100'}`}>
+          {options.map((o) => (
+            <button key={o.key} onClick={() => onChange(o.key)}
+              className={`flex-1 text-sm font-semibold rounded-md py-1.5 transition ${value === o.key ? 'bg-white text-indigo-600 shadow-sm' : (dark ? 'text-white/90' : 'text-slate-500')}`}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )
+    }
+
     // ========================================
     // 🧮 계산 헬퍼 (배열/반복문/reduce)
     // ========================================
 
-    // 한 가게의 멤버별 부담액 계산
-    function calcPlace(place, splitMode) {
-      const members = place.members
-      const n = members.length
-      const subtotals = members.map((m) => m.items.reduce((sum, it) => sum + it.price, 0))
-      const total = subtotals.reduce((sum, v) => sum + v, 0)
+    // 한 가게의 멤버별 부담액 계산 (quick: 총액 1/N, detail: 공유/개인 항목)
+    function calcPlace(place) {
+      const memberIds = place.members
+      const n = memberIds.length
+      const subtotal = {}
+      memberIds.forEach((id) => { subtotal[id] = 0 })
+      let total = 0
+
+      if (place.mode === 'quick') {
+        total = parseFloat(place.quickAmount) || 0
+        if (n > 0) { const each = total / n; memberIds.forEach((id) => { subtotal[id] += each }) }
+      } else {
+        place.items.forEach((it) => {
+          total += it.price
+          if (it.shared) {
+            if (n > 0) { const each = it.price / n; memberIds.forEach((id) => { subtotal[id] += each }) }
+          } else if (subtotal[it.ownerId] != null) {
+            subtotal[it.ownerId] += it.price
+          }
+        })
+      }
+
       const dv = parseFloat(place.discount.value) || 0
       let discountAmount = place.discount.type === 'percent' ? Math.round(total * dv / 100) : dv
       discountAmount = Math.max(0, Math.min(discountAmount, total))
       const afterDiscount = total - discountAmount
 
-      let allocated = 0
-      const shares = members.map((m, i) => {
-        let pay
-        if (splitMode === 'equal') pay = n > 0 ? Math.round(afterDiscount / n) : 0
-        else pay = total > 0 ? Math.round(afterDiscount * subtotals[i] / total) : 0
-        allocated += pay
-        return { personId: m.personId, subtotal: subtotals[i], pay }
-      })
-      if (shares.length > 0) shares[shares.length - 1].pay += afterDiscount - allocated // 단수차이 보정
+      const shares = memberIds.map((id) => ({
+        personId: id,
+        subtotal: subtotal[id],
+        pay: total > 0 ? Math.round(afterDiscount * subtotal[id] / total) : 0
+      }))
 
-      return { subtotals, total, discountAmount, afterDiscount, shares }
+      // 우수리(반올림 차액)는 결제자가 흡수 (없으면 마지막 멤버)
+      const payerIsMember = memberIds.includes(place.payerId)
+      if (shares.length > 0) {
+        const summed = shares.reduce((s, x) => s + x.pay, 0)
+        let idx = payerIsMember ? shares.findIndex((s) => s.personId === place.payerId) : shares.length - 1
+        if (idx < 0) idx = shares.length - 1
+        shares[idx].pay += afterDiscount - summed
+      }
+
+      return { total, discountAmount, afterDiscount, shares, payerIsMember }
     }
 
     // ========================================
-    // 🧩 멤버별 메뉴 입력 (한 가게 안의 한 사람)
+    // 🧩 메뉴 입력 폼 (detail 모드)
     // ========================================
 
-    function MemberMenu({ placeId, member, name, pay, onAddItem, onRemoveItem, onRemoveMember }) {
-      const [menuName, setMenuName] = useState('')
-      const [menuPrice, setMenuPrice] = useState('')
-      const subtotal = member.items.reduce((sum, it) => sum + it.price, 0)
+    function ItemForm({ placeId, members, people, onAddItem }) {
+      const [name, setName] = useState('')
+      const [price, setPrice] = useState('')
+      const [shared, setShared] = useState(true)
+      const [ownerId, setOwnerId] = useState(members[0] || null)
 
       function handleAdd() {
-        const price = parseInt(menuPrice, 10)
-        if (!menuName.trim() || isNaN(price) || price <= 0) return
-        onAddItem(placeId, member.personId, menuName.trim(), price)
-        setMenuName('')
-        setMenuPrice('')
+        const p = parseInt(price, 10)
+        if (!name.trim() || isNaN(p) || p <= 0) return
+        const owner = shared ? null : (members.includes(ownerId) ? ownerId : members[0])
+        if (!shared && owner == null) return // 개인인데 참여자가 없음
+        onAddItem(placeId, { name: name.trim(), price: p, shared, ownerId: owner })
+        setName(''); setPrice('')
       }
 
       return (
-        <div className="rounded-xl border border-slate-200 p-3">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="font-semibold text-slate-800">{name}</span>
-            <Badge className="bg-slate-100 text-slate-600">소계 {formatWon(subtotal)}</Badge>
-            <Badge className="bg-indigo-50 text-indigo-600">부담 {formatWon(pay)}</Badge>
-            <button onClick={() => onRemoveMember(placeId, member.personId)} className="ml-auto text-slate-300 hover:text-red-500 text-xs">참여 취소</button>
-          </div>
-
-          <ul className="space-y-1 mb-2">
-            {member.items.length === 0 && <li className="text-xs text-slate-400">먹은 메뉴를 추가하세요</li>}
-            {member.items.map((it) => (
-              <li key={it.id} className="flex items-center gap-2 text-sm">
-                <span className="flex-1 text-slate-700">{it.name}</span>
-                <span className="text-slate-500 tabular-nums">{formatWon(it.price)}</span>
-                <button onClick={() => onRemoveItem(placeId, member.personId, it.id)} className="text-slate-300 hover:text-red-500 px-1">✕</button>
-              </li>
-            ))}
-          </ul>
-
+        <div className="rounded-xl border border-slate-200 p-3 space-y-2">
           <div className="flex gap-2">
-            <Input placeholder="메뉴명" value={menuName} onChange={(e) => setMenuName(e.target.value)} className="flex-1" />
-            <Input type="number" placeholder="가격" value={menuPrice} onChange={(e) => setMenuPrice(e.target.value)} className="w-24"
+            <Input placeholder="메뉴명" value={name} onChange={(e) => setName(e.target.value)} className="flex-1" />
+            <MoneyInput placeholder="가격" value={price} onChange={(v) => setPrice(v)} className="w-28"
               onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }} />
-            <Button variant="secondary" onClick={handleAdd} className="shrink-0">추가</Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-40"><Segment value={shared ? 'shared' : 'mine'} onChange={(k) => setShared(k === 'shared')}
+              options={[{ key: 'shared', label: '공유' }, { key: 'mine', label: '개인' }]} /></div>
+            {!shared && (
+              <select value={ownerId == null ? '' : String(ownerId)} onChange={(e) => setOwnerId(Number(e.target.value))}
+                className="flex-1 rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                {members.length === 0 && <option value="">참여자 없음</option>}
+                {members.map((id) => <option key={id} value={String(id)}>{nameOf(people, id)}</option>)}
+              </select>
+            )}
+            <Button variant="secondary" onClick={handleAdd} className="shrink-0 ml-auto">추가</Button>
           </div>
         </div>
       )
     }
 
     // ========================================
-    // 🧩 가게 카드 (이름·결제자·할인·참여자 메뉴)
+    // 🧩 메뉴 한 줄 (탭하면 전체 수정)
     // ========================================
 
-    function PlaceCard({ place, people, result, onRename, onSetPayer, onSetDiscount, onRemove, onAddMember, onRemoveMember, onAddItem, onRemoveItem }) {
+    function ItemRow({ placeId, item, members, people, onUpdate, onRemove }) {
+      const [editing, setEditing] = useState(false)
+      const [name, setName] = useState(item.name)
+      const [price, setPrice] = useState(String(item.price))
+      const [shared, setShared] = useState(item.shared)
+      const [ownerId, setOwnerId] = useState(item.ownerId)
+
+      function startEdit() {
+        setName(item.name); setPrice(String(item.price)); setShared(item.shared)
+        setOwnerId(members.includes(item.ownerId) ? item.ownerId : (members[0] ?? null))
+        setEditing(true)
+      }
+      function save() {
+        const p = parseInt(price, 10)
+        if (!name.trim() || isNaN(p) || p <= 0) return
+        const owner = shared ? null : (members.includes(ownerId) ? ownerId : members[0])
+        if (!shared && owner == null) return
+        onUpdate(placeId, item.id, { name: name.trim(), price: p, shared, ownerId: owner })
+        setEditing(false)
+      }
+
+      if (!editing) {
+        return (
+          <li className="flex items-center gap-2 text-sm">
+            <button onClick={startEdit} className="flex items-center gap-2 flex-1 text-left rounded px-1 -mx-1 py-0.5 hover:bg-slate-50">
+              <span className="text-slate-700">{item.name}</span>
+              {item.shared
+                ? <Badge className="bg-amber-50 text-amber-600">공유</Badge>
+                : <Badge className="bg-slate-100 text-slate-500">개인 · {nameOf(people, item.ownerId)}</Badge>}
+              <span className="ml-auto text-slate-500 tabular-nums">{formatWon(item.price)}</span>
+              <span className="text-slate-300 text-xs">✎</span>
+            </button>
+            <button onClick={() => onRemove(placeId, item.id)} className="text-slate-300 hover:text-red-500 px-1">✕</button>
+          </li>
+        )
+      }
+      return (
+        <li className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-2">
+          <div className="flex gap-2">
+            <Input placeholder="메뉴명" value={name} onChange={(e) => setName(e.target.value)} className="flex-1" />
+            <MoneyInput placeholder="가격" value={price} onChange={setPrice} className="w-28"
+              onKeyDown={(e) => { if (e.key === 'Enter') save() }} />
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-40"><Segment value={shared ? 'shared' : 'mine'} onChange={(k) => setShared(k === 'shared')}
+              options={[{ key: 'shared', label: '공유' }, { key: 'mine', label: '개인' }]} /></div>
+            {!shared && (
+              <select value={ownerId == null ? '' : String(ownerId)} onChange={(e) => setOwnerId(Number(e.target.value))}
+                className="flex-1 rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                {members.length === 0 && <option value="">참여자 없음</option>}
+                {members.map((id) => <option key={id} value={String(id)}>{nameOf(people, id)}</option>)}
+              </select>
+            )}
+            <Button onClick={save} className="ml-auto shrink-0">완료</Button>
+          </div>
+        </li>
+      )
+    }
+
+    // ========================================
+    // 🧩 가게 카드
+    // ========================================
+
+    function PlaceCard({ place, people, result, onRename, onSetPayer, onSetMode, onSetQuick, onSetDiscount, onRemove, onAddMember, onRemoveMember, onAddItem, onUpdateItem, onRemoveItem }) {
+      const [showDiscount, setShowDiscount] = useState(!!(place.discount.value && place.discount.value !== '0'))
       const payMap = {}
       result.shares.forEach((s) => { payMap[s.personId] = s.pay })
-      const memberIds = place.members.map((m) => m.personId)
-      const candidates = people.filter((p) => !memberIds.includes(p.id)) // 아직 참여 안 한 명부 인원
+      const candidates = people.filter((p) => !place.members.includes(p.id))
 
       return (
         <Card className="p-4 space-y-3">
           <div className="flex items-center gap-2">
-            <input
-              value={place.name}
-              onChange={(e) => onRename(place.id, e.target.value)}
-              placeholder="가게명"
-              className="flex-1 font-bold text-slate-800 bg-transparent border-b border-slate-200 focus:border-indigo-400 focus:outline-none py-1"
-            />
+            <input value={place.name} onChange={(e) => onRename(place.id, e.target.value)} placeholder="가게명"
+              className="flex-1 font-bold text-slate-800 bg-transparent border-b border-slate-200 focus:border-indigo-400 focus:outline-none py-1" />
             <Badge className="bg-indigo-50 text-indigo-600">합계 {formatWon(result.total)}</Badge>
-            <Button variant="danger" size="sm" onClick={() => onRemove(place.id)}>가게 삭제</Button>
+            <Button variant="danger" size="sm" onClick={() => onRemove(place.id)}>삭제</Button>
           </div>
 
-          {/* 결제자 + 할인 */}
-          <div className="flex flex-wrap gap-2">
-            <label className="flex-1 min-w-[140px]">
+          <div className="flex flex-wrap gap-2 items-end">
+            <label className="flex-1 min-w-[130px]">
               <span className="block text-xs font-medium text-slate-500 mb-1">결제자</span>
-              <select
-                value={place.payerId == null ? '' : String(place.payerId)}
+              <select value={place.payerId == null ? '' : String(place.payerId)}
                 onChange={(e) => onSetPayer(place.id, e.target.value === '' ? null : Number(e.target.value))}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-              >
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
                 <option value="">결제자 선택</option>
-                {place.members.map((m) => (
-                  <option key={m.personId} value={String(m.personId)}>{nameOf(people, m.personId)}</option>
-                ))}
+                {place.members.map((id) => <option key={id} value={String(id)}>{nameOf(people, id)}</option>)}
               </select>
             </label>
-            <label className="w-40">
-              <span className="block text-xs font-medium text-slate-500 mb-1">할인</span>
-              <div className="flex gap-1">
-                <select
-                  value={place.discount.type}
-                  onChange={(e) => onSetDiscount(place.id, { ...place.discount, type: e.target.value })}
-                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                >
-                  <option value="percent">%</option>
-                  <option value="amount">원</option>
-                </select>
-                <input
-                  type="number"
-                  value={place.discount.value}
-                  onChange={(e) => onSetDiscount(place.id, { ...place.discount, value: e.target.value })}
-                  placeholder="0"
-                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                />
-              </div>
-            </label>
+            <div className="w-44">
+              <span className="block text-xs font-medium text-slate-500 mb-1">입력 방식</span>
+              <Segment value={place.mode} onChange={(k) => onSetMode(place.id, k)}
+                options={[{ key: 'quick', label: '빠른 1/N' }, { key: 'detail', label: '상세' }]} />
+            </div>
           </div>
 
-          {/* 참여자별 메뉴 */}
-          <div className="space-y-2">
-            {place.members.map((m) => (
-              <MemberMenu
-                key={m.personId}
-                placeId={place.id}
-                member={m}
-                name={nameOf(people, m.personId)}
-                pay={payMap[m.personId] || 0}
-                onAddItem={onAddItem}
-                onRemoveItem={onRemoveItem}
-                onRemoveMember={onRemoveMember}
-              />
+          {/* 참여자 칩 */}
+          <div className="flex flex-wrap gap-2">
+            {place.members.map((id) => (
+              <span key={id} className="inline-flex items-center gap-1 bg-slate-100 rounded-full pl-3 pr-2 py-1 text-sm">
+                {nameOf(people, id)}
+                <button onClick={() => onRemoveMember(place.id, id)} className="text-slate-400 hover:text-red-500">✕</button>
+              </span>
             ))}
+            {place.members.length === 0 && <span className="text-sm text-slate-400">참여자를 추가하세요</span>}
+            {candidates.length > 0 && (
+              <select value="" onChange={(e) => { if (e.target.value) onAddMember(place.id, Number(e.target.value)) }}
+                className="rounded-full border border-dashed border-indigo-300 text-indigo-600 px-3 py-1 text-sm focus:outline-none">
+                <option value="">+ 참여자</option>
+                {candidates.map((p) => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
+              </select>
+            )}
           </div>
 
-          {/* 참여자 추가 */}
-          {candidates.length > 0 && (
-            <select
-              value=""
-              onChange={(e) => { if (e.target.value) onAddMember(place.id, Number(e.target.value)) }}
-              className="w-full rounded-lg border border-dashed border-indigo-300 text-indigo-600 px-3 py-2 text-sm focus:outline-none"
-            >
-              <option value="">+ 이 가게에 참여자 추가</option>
-              {candidates.map((p) => (
-                <option key={p.id} value={String(p.id)}>{p.name}</option>
+          {/* 입력 영역 */}
+          {place.mode === 'quick' ? (
+            <MoneyInput label="총액 (참여자끼리 1/N)" value={place.quickAmount}
+              onChange={(v) => onSetQuick(place.id, v)} placeholder="예: 60,000" />
+          ) : (
+            <div className="space-y-2">
+              <ItemForm placeId={place.id} members={place.members} people={people} onAddItem={onAddItem} />
+              <ul className="space-y-1">
+                {place.items.map((it) => (
+                  <ItemRow key={it.id} placeId={place.id} item={it} members={place.members} people={people}
+                    onUpdate={onUpdateItem} onRemove={onRemoveItem} />
+                ))}
+                {place.items.length === 0 && <li className="text-xs text-slate-400">메뉴를 추가하세요</li>}
+              </ul>
+            </div>
+          )}
+
+          {/* 정산 미반영 힌트 (결제자 없음/멤버 없음인데 지출은 있음) */}
+          {result.total > 0 && !place.members.includes(place.payerId) && (
+            <div className="rounded-lg bg-amber-50 text-amber-700 text-xs px-3 py-2">
+              ⚠️ {place.members.length === 0 ? '참여자를 추가하고 ' : ''}결제자를 선택해야 이 가게가 정산에 반영됩니다.
+            </div>
+          )}
+
+          {/* 멤버별 부담 요약 */}
+          {place.members.length > 0 && (
+            <div className="rounded-xl bg-slate-50 p-3 space-y-1">
+              {place.members.map((id) => (
+                <div key={id} className="flex justify-between text-sm">
+                  <span className="text-slate-600">{nameOf(people, id)}{place.payerId === id && <span className="ml-1 text-xs text-indigo-500">(결제자)</span>}</span>
+                  <span className="font-semibold tabular-nums text-slate-800">{formatWon(payMap[id] || 0)}</span>
+                </div>
               ))}
-            </select>
+            </div>
+          )}
+
+          {/* 할인 (기본 숨김) */}
+          {showDiscount ? (
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <span className="block text-xs font-medium text-slate-500 mb-1">할인</span>
+                <div className="flex gap-1">
+                  <select value={place.discount.type} onChange={(e) => onSetDiscount(place.id, { ...place.discount, type: e.target.value })}
+                    className="rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                    <option value="percent">%</option>
+                    <option value="amount">원</option>
+                  </select>
+                  <input type="text" inputMode="numeric"
+                    value={place.discount.value === '' ? '' : (place.discount.type === 'amount' ? Number(place.discount.value).toLocaleString('ko-KR') : place.discount.value)}
+                    onChange={(e) => onSetDiscount(place.id, { ...place.discount, value: e.target.value.replace(/[^0-9]/g, '') })}
+                    placeholder="0" className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                </div>
+              </div>
+              <button onClick={() => { onSetDiscount(place.id, { ...place.discount, value: '0' }); setShowDiscount(false) }}
+                className="text-xs text-slate-400 hover:text-red-500 pb-2">할인 제거</button>
+            </div>
+          ) : (
+            <button onClick={() => setShowDiscount(true)} className="text-sm text-indigo-600 hover:underline">+ 할인 추가</button>
           )}
         </Card>
       )
     }
 
     // ========================================
-    // 🧩 참여자 명부 (전역 인원)
+    // 🧩 참여자 명부 (전역)
     // ========================================
 
     function PeopleRoster({ people, onAdd, onRemove }) {
       const [name, setName] = useState('')
-      function handleAdd() {
-        if (!name.trim()) return
-        onAdd(name.trim())
-        setName('')
-      }
+      function handleAdd() { if (!name.trim()) return; onAdd(name.trim()); setName('') }
       return (
         <Card className="p-4">
           <h2 className="font-bold text-slate-800 mb-3">참여자</h2>
@@ -275,24 +405,6 @@
             <Button onClick={handleAdd} className="shrink-0">추가</Button>
           </div>
         </Card>
-      )
-    }
-
-    // ========================================
-    // 🧩 정산 방식 토글
-    // ========================================
-
-    function SplitModeToggle({ splitMode, onChange }) {
-      const modes = [{ key: 'each', label: '각자 먹은 만큼' }, { key: 'equal', label: 'N분의 1' }]
-      return (
-        <div className="flex gap-1 bg-white/20 rounded-lg p-1">
-          {modes.map((m) => (
-            <button key={m.key} onClick={() => onChange(m.key)}
-              className={`flex-1 text-sm font-semibold rounded-md py-1.5 transition ${splitMode === m.key ? 'bg-white text-indigo-600 shadow-sm' : 'text-white/90'}`}>
-              {m.label}
-            </button>
-          ))}
-        </div>
       )
     }
 
@@ -332,11 +444,12 @@
     // 🔝 정산 결과 헤더 (가장 중요 — 최상단)
     // ========================================
 
-    function SettlementHeader({ settlement, people, splitMode, onChangeMode, settled, onToggle }) {
-      const { transfers, grandTotal, grandDiscount, grandAfter } = settlement
+    function SettlementHeader({ settlement, people, settled, onToggle }) {
+      const { transfers, netSummary, grandTotal, grandDiscount, grandAfter } = settlement
       const pending = transfers.filter((t) => !settled.has(`${t.fromId}->${t.toId}`))
       const doneList = transfers.filter((t) => settled.has(`${t.fromId}->${t.toId}`))
-      const ordered = [...pending, ...doneList] // 미이체 먼저
+      const ordered = [...pending, ...doneList]
+      const nets = netSummary.filter((s) => Math.round(s.net) !== 0)
 
       return (
         <Card className="p-5 bg-gradient-to-br from-indigo-600 to-indigo-500 text-white">
@@ -345,7 +458,16 @@
             <Badge className="bg-white/20 text-white">미이체 {pending.length}건</Badge>
           </div>
 
-          <div className="mb-4"><SplitModeToggle splitMode={splitMode} onChange={onChangeMode} /></div>
+          {/* 사람별 순정산 요약 */}
+          {nets.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-4">
+              {nets.map((s) => (
+                <span key={s.id} className={`rounded-full px-3 py-1 text-sm font-semibold ${s.net > 0 ? 'bg-emerald-400/25 text-emerald-50' : 'bg-amber-400/25 text-amber-50'}`}>
+                  {s.name} {s.net > 0 ? `+${formatWon(s.net)} 받음` : `−${formatWon(-s.net)} 보냄`}
+                </span>
+              ))}
+            </div>
+          )}
 
           <ul className="space-y-2 mb-4">
             {ordered.map((t) => (
@@ -365,28 +487,28 @@
     }
 
     // ========================================
-    // 초기 샘플 데이터 (한 번만 생성 — id 고정)
+    // 초기 샘플 데이터 (id 고정)
     // ========================================
 
     const P_HJ = makeId(), P_MS = makeId(), P_YH = makeId()
     const INITIAL_PEOPLE = [
-      { id: P_HJ, name: '현재' },
-      { id: P_MS, name: '민수' },
-      { id: P_YH, name: '영희' }
+      { id: P_HJ, name: '현재' }, { id: P_MS, name: '민수' }, { id: P_YH, name: '영희' }
     ]
     const INITIAL_PLACES = [
-      { id: makeId(), name: '파스타집', payerId: P_HJ, discount: { type: 'percent', value: '10' }, members: [
-        { personId: P_HJ, items: [{ id: makeId(), name: '파스타', price: 18000 }] },
-        { personId: P_MS, items: [{ id: makeId(), name: '스테이크', price: 32000 }] },
-        { personId: P_YH, items: [{ id: makeId(), name: '샐러드', price: 12000 }] }
-      ] },
-      { id: makeId(), name: '치킨집', payerId: P_MS, discount: { type: 'percent', value: '0' }, members: [
-        { personId: P_MS, items: [{ id: makeId(), name: '치킨', price: 20000 }] },
-        { personId: P_YH, items: [{ id: makeId(), name: '맥주', price: 6000 }] },
-        { personId: P_HJ, items: [{ id: makeId(), name: '콜라', price: 3000 }] }
-      ] }
+      { id: makeId(), name: '파스타집', payerId: P_HJ, mode: 'detail', quickAmount: '', discount: { type: 'percent', value: '10' },
+        members: [P_HJ, P_MS, P_YH], items: [
+          { id: makeId(), name: '파스타', price: 18000, shared: false, ownerId: P_HJ },
+          { id: makeId(), name: '스테이크', price: 32000, shared: false, ownerId: P_MS },
+          { id: makeId(), name: '샐러드', price: 12000, shared: false, ownerId: P_YH }
+        ] },
+      { id: makeId(), name: '치킨집', payerId: P_MS, mode: 'detail', quickAmount: '', discount: { type: 'percent', value: '0' },
+        members: [P_MS, P_YH, P_HJ], items: [
+          { id: makeId(), name: '치킨', price: 20000, shared: true, ownerId: null },
+          { id: makeId(), name: '맥주', price: 6000, shared: false, ownerId: P_YH },
+          { id: makeId(), name: '콜라', price: 3000, shared: false, ownerId: P_HJ }
+        ] }
     ]
-    const INITIAL_SETTLED = [`${P_YH}->${P_MS}`] // 영희→민수는 이체 완료(샘플)
+    const INITIAL_SETTLED = [`${P_YH}->${P_MS}`] // 영희→민수 이체 완료(샘플)
 
     // ========================================
     // 🚀 App
@@ -395,106 +517,104 @@
     function App() {
       const [people, setPeople] = useState(INITIAL_PEOPLE)
       const [places, setPlaces] = useState(INITIAL_PLACES)
-      const [splitMode, setSplitMode] = useState('each')
       const [settled, setSettled] = useState(() => new Set(INITIAL_SETTLED))
 
-      // --- 참여자(명부) ---
-      function addPerson(name) {
-        setPeople([...people, { id: makeId(), name }])
-      }
+      // --- 참여자 명부 ---
+      function addPerson(name) { setPeople([...people, { id: makeId(), name }]) }
       function removePerson(personId) {
         setPeople(people.filter((p) => p.id !== personId))
-        // 모든 가게에서 제거 + 결제자였으면 해제
         setPlaces(places.map((pl) => ({
           ...pl,
           payerId: pl.payerId === personId ? null : pl.payerId,
-          members: pl.members.filter((m) => m.personId !== personId)
+          members: pl.members.filter((id) => id !== personId),
+          items: pl.items.filter((it) => it.shared || it.ownerId !== personId)
         })))
       }
 
       // --- 가게 ---
+      function patchPlace(placeId, patch) { setPlaces(places.map((pl) => pl.id === placeId ? { ...pl, ...patch } : pl)) }
       function addPlace() {
-        setPlaces([...places, { id: makeId(), name: '', payerId: null, discount: { type: 'percent', value: '0' }, members: [] }])
+        const memberIds = people.map((p) => p.id) // 명부 전원 자동 포함
+        setPlaces([...places, { id: makeId(), name: '', payerId: memberIds[0] ?? null, mode: 'quick', quickAmount: '', discount: { type: 'percent', value: '0' }, members: memberIds, items: [] }])
       }
-      function patchPlace(placeId, patch) {
-        setPlaces(places.map((pl) => pl.id === placeId ? { ...pl, ...patch } : pl))
-      }
-      function renamePlace(placeId, name) { patchPlace(placeId, { name }) }
-      function setPayer(placeId, payerId) { patchPlace(placeId, { payerId }) }
-      function setDiscount(placeId, discount) { patchPlace(placeId, { discount }) }
       function removePlace(placeId) { setPlaces(places.filter((pl) => pl.id !== placeId)) }
+      const renamePlace = (id, name) => patchPlace(id, { name })
+      const setPayer = (id, payerId) => patchPlace(id, { payerId })
+      const setMode = (id, mode) => patchPlace(id, { mode })
+      const setQuick = (id, quickAmount) => patchPlace(id, { quickAmount })
+      const setDiscount = (id, discount) => patchPlace(id, { discount })
 
       function addMember(placeId, personId) {
-        setPlaces(places.map((pl) => pl.id === placeId
-          ? { ...pl, members: [...pl.members, { personId, items: [] }] }
-          : pl))
+        setPlaces(places.map((pl) => pl.id === placeId ? { ...pl, members: [...pl.members, personId] } : pl))
       }
       function removeMember(placeId, personId) {
+        setPlaces(places.map((pl) => pl.id === placeId ? {
+          ...pl,
+          payerId: pl.payerId === personId ? null : pl.payerId,
+          members: pl.members.filter((id) => id !== personId),
+          items: pl.items.filter((it) => it.shared || it.ownerId !== personId)
+        } : pl))
+      }
+      function addItem(placeId, item) {
+        setPlaces(places.map((pl) => pl.id === placeId ? { ...pl, items: [...pl.items, { id: makeId(), ...item }] } : pl))
+      }
+      function updateItem(placeId, itemId, patch) {
         setPlaces(places.map((pl) => pl.id === placeId
-          ? { ...pl, payerId: pl.payerId === personId ? null : pl.payerId, members: pl.members.filter((m) => m.personId !== personId) }
+          ? { ...pl, items: pl.items.map((it) => it.id === itemId ? { ...it, ...patch } : it) }
           : pl))
       }
-      function addItem(placeId, personId, name, price) {
-        setPlaces(places.map((pl) => pl.id === placeId
-          ? { ...pl, members: pl.members.map((m) => m.personId === personId ? { ...m, items: [...m.items, { id: makeId(), name, price }] } : m) }
-          : pl))
-      }
-      function removeItem(placeId, personId, itemId) {
-        setPlaces(places.map((pl) => pl.id === placeId
-          ? { ...pl, members: pl.members.map((m) => m.personId === personId ? { ...m, items: m.items.filter((it) => it.id !== itemId) } : m) }
-          : pl))
+      function removeItem(placeId, itemId) {
+        setPlaces(places.map((pl) => pl.id === placeId ? { ...pl, items: pl.items.filter((it) => it.id !== itemId) } : pl))
       }
 
-      // --- 이체 토글 ---
       function toggleSettled(key) {
         const next = new Set(settled)
-        if (next.has(key)) next.delete(key)
-        else next.add(key)
+        if (next.has(key)) next.delete(key); else next.add(key)
         setSettled(next)
       }
 
-      // --- 정산 계산 (가게별 분담 → 채무 → 사람쌍 상계) ---
+      // --- 정산 계산 ---
       const settlement = useMemo(() => {
         let grandTotal = 0, grandDiscount = 0, grandAfter = 0
-        const contribs = [] // {fromId, toId, place, amount}
+        const contribs = []
+        const paid = {}, owed = {}
+        people.forEach((p) => { paid[p.id] = 0; owed[p.id] = 0 })
 
         const placeResults = places.map((place) => {
-          const r = calcPlace(place, splitMode)
-          grandTotal += r.total
-          grandDiscount += r.discountAmount
-          grandAfter += r.afterDiscount
-          const payerId = place.payerId
-          const payerIsMember = place.members.some((m) => m.personId === payerId)
-          if (payerIsMember) {
+          const r = calcPlace(place)
+          grandTotal += r.total; grandDiscount += r.discountAmount; grandAfter += r.afterDiscount
+          // 결제자가 있는 가게만 정산 집계 (없으면 송금·순정산에서 제외 → Σnet=0 유지)
+          if (r.payerIsMember) {
+            paid[place.payerId] = (paid[place.payerId] || 0) + r.afterDiscount
             r.shares.forEach((s) => {
-              if (s.personId !== payerId && s.pay > 0) {
-                contribs.push({ fromId: s.personId, toId: payerId, place: place.name || '이름없는 가게', amount: s.pay })
+              if (owed[s.personId] != null) owed[s.personId] += s.pay
+              if (s.personId !== place.payerId && s.pay > 0) {
+                contribs.push({ fromId: s.personId, toId: place.payerId, place: place.name || '이름없는 가게', amount: s.pay })
               }
             })
           }
           return { place, result: r }
         })
 
-        // 사람쌍별 상계 (canonical: 작은 id = a, 큰 id = b)
+        // 사람쌍별 양방향 상계
         const pairs = {}
         contribs.forEach((c) => {
-          const a = Math.min(c.fromId, c.toId)
-          const b = Math.max(c.fromId, c.toId)
+          const a = Math.min(c.fromId, c.toId), b = Math.max(c.fromId, c.toId)
           const k = `${a}_${b}`
           if (!pairs[k]) pairs[k] = { a, b, net: 0, breakdown: [] }
-          const sign = c.fromId === a ? 1 : -1 // a→b 방향을 +로
-          pairs[k].net += sign * c.amount
+          pairs[k].net += (c.fromId === a ? 1 : -1) * c.amount
           pairs[k].breakdown.push({ place: c.place, fromId: c.fromId, toId: c.toId, amount: c.amount })
         })
         const transfers = Object.values(pairs).map((p) => {
           if (p.net === 0) return null
-          const fromId = p.net > 0 ? p.a : p.b
-          const toId = p.net > 0 ? p.b : p.a
-          return { fromId, toId, amount: Math.abs(p.net), breakdown: p.breakdown }
+          return { fromId: p.net > 0 ? p.a : p.b, toId: p.net > 0 ? p.b : p.a, amount: Math.abs(p.net), breakdown: p.breakdown }
         }).filter(Boolean)
 
-        return { placeResults, transfers, grandTotal, grandDiscount, grandAfter }
-      }, [places, splitMode])
+        // 사람별 순정산
+        const netSummary = people.map((p) => ({ id: p.id, name: p.name, net: (paid[p.id] || 0) - (owed[p.id] || 0) }))
+
+        return { placeResults, transfers, netSummary, grandTotal, grandDiscount, grandAfter }
+      }, [people, places])
 
       const resultByPlace = {}
       settlement.placeResults.forEach((pr) => { resultByPlace[pr.place.id] = pr.result })
@@ -503,38 +623,20 @@
         <div className="max-w-2xl mx-auto px-4 py-8 space-y-4">
           <header>
             <h1 className="text-2xl font-extrabold text-slate-800">💸 더치페이 계산기</h1>
-            <p className="text-sm text-slate-500 mt-1">가게마다 결제자·할인을 따로 두고, 여러 자리를 한 번에 정산합니다. 누가 누구에게 얼마 보낼지 상계해 보여줘요.</p>
+            <p className="text-sm text-slate-500 mt-1">가게마다 결제자를 따로 두고, 공유/개인 메뉴를 나눠 정산합니다. 누가 누구에게 얼마 보낼지 상계해 보여줘요.</p>
           </header>
 
-          {/* 🔝 정산 결과 (최상단) */}
-          <SettlementHeader
-            settlement={settlement}
-            people={people}
-            splitMode={splitMode}
-            onChangeMode={setSplitMode}
-            settled={settled}
-            onToggle={toggleSettled}
-          />
+          <SettlementHeader settlement={settlement} people={people} settled={settled} onToggle={toggleSettled} />
 
-          {/* 참여자 명부 */}
           <PeopleRoster people={people} onAdd={addPerson} onRemove={removePerson} />
 
-          {/* 가게 목록 */}
           <div className="space-y-4">
             {places.map((place) => (
               <PlaceCard
-                key={place.id}
-                place={place}
-                people={people}
-                result={resultByPlace[place.id]}
-                onRename={renamePlace}
-                onSetPayer={setPayer}
-                onSetDiscount={setDiscount}
-                onRemove={removePlace}
-                onAddMember={addMember}
-                onRemoveMember={removeMember}
-                onAddItem={addItem}
-                onRemoveItem={removeItem}
+                key={place.id} place={place} people={people} result={resultByPlace[place.id]}
+                onRename={renamePlace} onSetPayer={setPayer} onSetMode={setMode} onSetQuick={setQuick}
+                onSetDiscount={setDiscount} onRemove={removePlace}
+                onAddMember={addMember} onRemoveMember={removeMember} onAddItem={addItem} onUpdateItem={updateItem} onRemoveItem={removeItem}
               />
             ))}
             <Button variant="ghost" onClick={addPlace} className="w-full border border-dashed border-indigo-300 py-3">+ 가게 추가</Button>
