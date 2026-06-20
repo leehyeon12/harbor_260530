@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>APOD Magazine — Astronomy Picture of the Day</title>
+
+  <!-- ⚠️ 모든 CDN 은 버전 고정. 미고정 시 @babel/standalone 이 8.x 로 올라가
+       type="text/babel" 인라인 변환이 깨진다. Babel 은 반드시 7.x. -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+
+  <!-- Google Fonts: 디스플레이용 Playfair Display + 한글 본문용 Noto Serif KR -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,700;0,900;1,500&family=Noto+Serif+KR:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    /* Tailwind 로 표현하기 어려운 부분만 커스텀 CSS 로 처리 */
+    :root {
+      --gold: #e8c97a;
+      --cyan: #6fe6e0;
+    }
+    body { background-color: #05030f; }
+
+    .font-display { font-family: 'Playfair Display', serif; }
+    .font-serif-kr { font-family: 'Noto Serif KR', serif; }
+
+    /* 우주 배경: 짙은 남보라 그라데이션 + 은은한 성운 광채 */
+    .cosmos-bg {
+      background:
+        radial-gradient(ellipse at 20% 0%, rgba(70, 40, 120, 0.45), transparent 55%),
+        radial-gradient(ellipse at 85% 15%, rgba(20, 90, 110, 0.35), transparent 50%),
+        radial-gradient(ellipse at 50% 100%, rgba(40, 20, 80, 0.4), transparent 60%),
+        linear-gradient(180deg, #05030f 0%, #0a0820 45%, #060414 100%);
+    }
+
+    /* 별 가루: 다중 radial-gradient 로 정적인 별빛 표현 */
+    .starfield::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background-image:
+        radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.9), transparent),
+        radial-gradient(1px 1px at 60% 70%, rgba(255,255,255,0.7), transparent),
+        radial-gradient(1.5px 1.5px at 80% 20%, rgba(255,255,255,0.8), transparent),
+        radial-gradient(1px 1px at 35% 85%, rgba(255,255,255,0.6), transparent),
+        radial-gradient(1px 1px at 90% 60%, rgba(255,255,255,0.75), transparent),
+        radial-gradient(1px 1px at 10% 60%, rgba(255,255,255,0.5), transparent),
+        radial-gradient(1.5px 1.5px at 45% 15%, rgba(255,255,255,0.85), transparent),
+        radial-gradient(1px 1px at 70% 45%, rgba(255,255,255,0.55), transparent);
+      background-repeat: repeat;
+      background-size: 600px 600px;
+      animation: twinkle 6s ease-in-out infinite alternate;
+    }
+    @keyframes twinkle {
+      from { opacity: 0.5; }
+      to { opacity: 0.95; }
+    }
+
+    /* 콘텐츠 등장 시 부드러운 fade-in + 살짝 위로 */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .fade-up { animation: fadeUp 0.7s ease-out both; }
+
+    /* 드롭캡: 본문 첫 글자를 크게 */
+    .dropcap::first-letter {
+      font-family: 'Playfair Display', serif;
+      font-size: 3.8rem;
+      line-height: 0.8;
+      font-weight: 700;
+      float: left;
+      margin: 0.1rem 0.6rem 0 0;
+      color: var(--gold);
+    }
+
+    /* 스켈레톤 펄스 */
+    @keyframes shimmer {
+      0% { opacity: 0.35; }
+      50% { opacity: 0.7; }
+      100% { opacity: 0.35; }
+    }
+    .shimmer { animation: shimmer 1.6s ease-in-out infinite; }
+
+    /* 본문 읽기 폭 제한 (약 65ch) */
+    .measure { max-width: 65ch; }
+
+    /* 스크롤바 살짝 다듬기 */
+    ::-webkit-scrollbar { width: 10px; }
+    ::-webkit-scrollbar-track { background: #05030f; }
+    ::-webkit-scrollbar-thumb { background: #2a2350; border-radius: 8px; }
+  </style>
+</head>
+<body class="cosmos-bg starfield text-stone-200 font-serif-kr">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 추출
+    // ========================================
+    const { useState, useEffect, useCallback } = React
+
+    // ========================================
+    // 상수 / 설정
+    // ========================================
+    // API_BASE_URL 은 NASA 외부 API 이므로 절대경로가 불가피하지만,
+    // localhost 하드코딩은 아니다. 발급받은 개인 API 키 사용 (DEMO_KEY 대비 호출 한도 넉넉).
+    const API_BASE_URL = 'https://api.nasa.gov/planetary/apod'
+    const API_KEY = '1X9WPkuhidBvFCkL2aQYY4nOoITBNPWZAOZRNS1l'
+    const MIN_DATE = '1995-06-16' // APOD 최초 발행일
+    const TODAY = '2026-06-20'    // 기준 오늘 (env currentDate)
+
+    // 폴백 데이터: fetch 실패 시 빈 화면 방지를 위해 초기 상태값으로도 사용
+    const FALLBACK_APOD = {
+      date: '2026-06-20',
+      title: 'Daytime Moon Meets Evening Star',
+      copyright: 'Debra Ceravolo',
+      media_type: 'image',
+      url: 'https://apod.nasa.gov/apod/image/2606/Venus_Moon_2026_06_17_1024.jpg',
+      hdurl: 'https://apod.nasa.gov/apod/image/2606/Venus_Moon_2026_06_17.jpg',
+      explanation: "Venus is now appearing on the celestial stage as Earth's brilliant evening star, performing with the Moon, other wandering planets, and bright stars in western skies. For evening sky gazers on June 17, the celestial beacon rose after sunset close by a young, slender, crescent Moon. But from some locations the Moon could be seen to occult or pass in front of Venus. And from a backyard observatory in southern British Columbia, Canada, the lunar occultation was played out in daylight. This stunning telescopic snapshot captured a scene in dramatically cloudy skies, following Venus' hour long disappearance, as the evening star emerged beyond the bright lunar limb."
+    }
+
+    // 2026-06-20 전용 한글 번역
+    const KO_TRANSLATION = '금성이 지금 지구의 눈부신 ‘저녁 별’로서 천상의 무대에 올라, 달과 다른 떠도는 행성들, 그리고 서쪽 하늘의 밝은 별들과 함께 공연하고 있다. 6월 17일 저녁 하늘을 올려다본 이들에게, 이 천상의 등불은 해가 진 직후 가늘고 어린 초승달 곁에서 떠올랐다. 그러나 일부 지역에서는 달이 금성을 가리는 ‘엄폐(occultation)’ 현상 — 달이 금성 앞을 지나가는 모습 — 을 볼 수 있었다. 캐나다 브리티시컬럼비아 남부의 한 뒷마당 천문대에서는 이 월엄폐가 대낮에 펼쳐졌다. 극적으로 구름이 낀 하늘을 담은 이 멋진 망원경 스냅샷은, 한 시간가량 자취를 감췄던 금성이 밝은 달의 가장자리 너머로 다시 모습을 드러내는 순간을 포착했다.'
+
+    // 발행일을 잡지 마스트헤드용 영문 포맷으로 변환
+    const formatDate = (iso) => {
+      try {
+        const d = new Date(iso + 'T00:00:00')
+        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+      } catch (e) {
+        return iso
+      }
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트
+    // ========================================
+
+    // 골드/시안 라벨 (마스트헤드, 섹션 제목용)
+    const Kicker = ({ children, color = 'gold', className = '' }) => {
+      const tone = color === 'cyan' ? 'text-[var(--cyan)]' : 'text-[var(--gold)]'
+      return (
+        <span className={`inline-block uppercase tracking-[0.35em] text-xs font-semibold ${tone} ${className}`}>
+          {children}
+        </span>
+      )
+    }
+
+    // 잡지풍 버튼
+    const Button = ({ children, onClick, variant = 'primary', className = '', ...rest }) => {
+      const base = 'inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-semibold tracking-wide transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#05030f]'
+      const variants = {
+        primary: 'bg-[var(--gold)] text-[#1a1305] hover:bg-amber-200 hover:shadow-[0_0_24px_rgba(232,201,122,0.4)] focus:ring-[var(--gold)]',
+        ghost: 'border border-white/20 text-stone-200 hover:border-[var(--cyan)] hover:text-[var(--cyan)] focus:ring-[var(--cyan)]'
+      }
+      return (
+        <button onClick={onClick} className={`${base} ${variants[variant]} ${className}`} {...rest}>
+          {children}
+        </button>
+      )
+    }
+
+    // ========================================
+    // 🧩 공통 / 레이아웃 컴포넌트
+    // ========================================
+
+    // 상단 마스트헤드 + 날짜 선택기
+    const Masthead = ({ date, onDateChange, disabled }) => {
+      return (
+        <header className="relative z-10 border-b border-white/10">
+          <div className="mx-auto max-w-6xl px-6 py-8 sm:py-10">
+            <div className="flex flex-col items-center text-center gap-3">
+              <Kicker color="cyan">NASA</Kicker>
+              <h1 className="font-display text-4xl sm:text-6xl font-black tracking-tight text-white leading-none">
+                Astronomy Picture
+                <span className="block italic text-[var(--gold)]">of the Day</span>
+              </h1>
+              <p className="font-display italic text-stone-400 text-sm sm:text-base">
+                A Daily Magazine of the Cosmos
+              </p>
+            </div>
+
+            {/* 날짜 선택기 */}
+            <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
+              <label htmlFor="apod-date" className="text-xs uppercase tracking-[0.25em] text-stone-400">
+                발행일 선택
+              </label>
+              <input
+                id="apod-date"
+                type="date"
+                value={date}
+                min={MIN_DATE}
+                max={TODAY}
+                disabled={disabled}
+                onChange={(e) => onDateChange(e.target.value)}
+                className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 text-stone-100 text-sm focus:outline-none focus:border-[var(--cyan)] focus:ring-1 focus:ring-[var(--cyan)] disabled:opacity-50 [color-scheme:dark]"
+              />
+            </div>
+          </div>
+        </header>
+      )
+    }
+
+    // 푸터
+    const Footer = () => (
+      <footer className="relative z-10 mt-16 border-t border-white/10">
+        <div className="mx-auto max-w-6xl px-6 py-10 text-center">
+          <p className="font-display italic text-stone-500 text-lg">Ad Astra.</p>
+          <p className="mt-3 text-xs uppercase tracking-[0.25em] text-stone-500">
+            Data: NASA APOD API
+          </p>
+          <p className="mt-1 text-[11px] text-stone-600">
+            apod.nasa.gov &middot; Imagery courtesy of NASA / respective copyright holders
+          </p>
+        </div>
+      </footer>
+    )
+
+    // ========================================
+    // 📄 화면 상태 컴포넌트 (로딩 / 에러)
+    // ========================================
+
+    // 로딩 스켈레톤 (잡지 레이아웃을 미리 그려 깜빡임 최소화)
+    const LoadingSkeleton = () => (
+      <div className="mx-auto max-w-6xl px-6 py-12">
+        <div className="shimmer space-y-6">
+          <div className="h-[40vh] sm:h-[60vh] w-full rounded-2xl bg-white/5"></div>
+          <div className="h-10 w-3/4 rounded bg-white/5"></div>
+          <div className="h-4 w-1/3 rounded bg-white/5"></div>
+          <div className="space-y-3 pt-4">
+            <div className="h-3 w-full rounded bg-white/5"></div>
+            <div className="h-3 w-full rounded bg-white/5"></div>
+            <div className="h-3 w-5/6 rounded bg-white/5"></div>
+          </div>
+        </div>
+        <p className="mt-8 text-center text-sm tracking-[0.25em] text-stone-500 uppercase">
+          별빛을 불러오는 중&hellip;
+        </p>
+      </div>
+    )
+
+    // 에러 안내 + 다시 시도 (폴백이 같이 보이므로 배너 형태)
+    const ErrorBanner = ({ message, onRetry }) => (
+      <div className="mx-auto max-w-3xl px-6 pt-8">
+        <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-5 py-4 text-center fade-up">
+          <p className="text-rose-200 text-sm">
+            데이터를 불러오지 못했습니다. {message ? `(${message})` : ''}
+          </p>
+          <p className="mt-1 text-xs text-rose-200/70">
+            NASA API 호출이 실패하여 보관된 기본 자료를 표시합니다.
+          </p>
+          <Button variant="ghost" onClick={onRetry} className="mt-4 border-rose-300/40 text-rose-100 hover:border-rose-200 hover:text-white">
+            다시 시도
+          </Button>
+        </div>
+      </div>
+    )
+
+    // ========================================
+    // 📄 미디어 렌더러 (image / video)
+    // ========================================
+    const ApodMedia = ({ apod }) => {
+      if (apod.media_type === 'video') {
+        return (
+          <div className="relative w-full overflow-hidden rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.7)] ring-1 ring-white/10">
+            <div className="aspect-video w-full">
+              <iframe
+                src={apod.url}
+                title={apod.title}
+                className="h-full w-full"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+              />
+            </div>
+          </div>
+        )
+      }
+
+      // 이미지: 클릭 시 hdurl 새 탭
+      const fullSrc = apod.hdurl || apod.url
+      return (
+        <a
+          href={fullSrc}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="group block overflow-hidden rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.7)] ring-1 ring-white/10"
+          title="클릭하면 고해상도 원본을 새 탭에서 봅니다"
+        >
+          <img
+            src={apod.url}
+            alt={apod.title}
+            loading="lazy"
+            className="w-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.03]"
+          />
+        </a>
+      )
+    }
+
+    // ========================================
+    // 📄 한글 번역 토글 섹션
+    // ========================================
+    const TranslationSection = ({ date }) => {
+      const [open, setOpen] = useState(false)
+      const hasTranslation = date === '2026-06-20'
+
+      return (
+        <div className="mt-10 border-t border-white/10 pt-8">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Kicker>한글 번역</Kicker>
+            </div>
+            <Button variant="ghost" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+              {open ? '접기' : '펼치기'}
+              <span className={`transition-transform duration-300 ${open ? 'rotate-180' : ''}`}>▾</span>
+            </Button>
+          </div>
+
+          {open && (
+            <div className="mt-5 measure fade-up">
+              {hasTranslation ? (
+                <p className="font-serif-kr text-lg leading-loose text-stone-200">
+                  {KO_TRANSLATION}
+                </p>
+              ) : (
+                <p className="font-serif-kr text-stone-400 italic leading-relaxed">
+                  이 날짜의 한글 번역은 제공되지 않습니다 (원문 참고).
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    // ========================================
+    // 📄 메인 기사 (잡지 표지 + 본문)
+    // ========================================
+    const ApodArticle = ({ apod }) => {
+      return (
+        <article className="relative z-10 mx-auto max-w-6xl px-6 py-12 fade-up">
+          {/* 히어로 미디어 */}
+          <ApodMedia apod={apod} />
+
+          {/* 표지 타이틀 블록 */}
+          <div className="mt-8 text-center">
+            <Kicker color="cyan">Feature &middot; {formatDate(apod.date)}</Kicker>
+            <h2 className="mt-4 font-display text-3xl sm:text-5xl font-bold leading-tight text-white">
+              {apod.title}
+            </h2>
+            {apod.copyright && (
+              <p className="mt-4 text-sm text-stone-400">
+                <span className="uppercase tracking-[0.2em] text-stone-500">Image Credit</span>
+                {' '}&middot;{' '}
+                <span className="italic text-[var(--gold)]">{apod.copyright.trim()}</span>
+              </p>
+            )}
+          </div>
+
+          {/* 장식용 구분선 */}
+          <div className="my-10 flex items-center justify-center gap-4">
+            <span className="h-px w-16 bg-white/15"></span>
+            <span className="text-[var(--gold)] text-lg">✦</span>
+            <span className="h-px w-16 bg-white/15"></span>
+          </div>
+
+          {/* 본문 기사 (영문 원문, 드롭캡) */}
+          <div className="mx-auto measure">
+            <Kicker className="mb-4">The Story</Kicker>
+            <p className="dropcap font-serif-kr text-lg leading-loose text-stone-200/95">
+              {apod.explanation}
+            </p>
+
+            {/* 한글 번역 토글 */}
+            <TranslationSection date={apod.date} />
+          </div>
+        </article>
+      )
+    }
+
+    // ========================================
+    // 🚀 App 루트 컴포넌트
+    // ========================================
+    const App = () => {
+      // 초기값을 폴백으로 채워 빈 화면 방지
+      const [apod, setApod] = useState(FALLBACK_APOD)
+      const [date, setDate] = useState(TODAY)
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)
+
+      // 특정 날짜 APOD 가져오기
+      const fetchApod = useCallback(async (targetDate) => {
+        setLoading(true)
+        setError(null)
+        try {
+          const url = `${API_BASE_URL}?api_key=${API_KEY}&date=${targetDate}`
+          const res = await fetch(url)
+          if (!res.ok) {
+            // 503(rate limit) 등 HTTP 에러 처리
+            throw new Error(`HTTP ${res.status}`)
+          }
+          const data = await res.json()
+          if (data && data.url) {
+            setApod(data)
+          } else {
+            throw new Error('빈 응답')
+          }
+        } catch (err) {
+          // 실패 시 폴백 유지 (오늘이면 폴백 데이터, 아니면 직전 상태 유지)
+          setError(err.message || '알 수 없는 오류')
+          if (targetDate === FALLBACK_APOD.date) {
+            setApod(FALLBACK_APOD)
+          }
+        } finally {
+          setLoading(false)
+        }
+      }, [])
+
+      // 최초 로드 + 날짜 변경 시 재조회
+      useEffect(() => {
+        fetchApod(date)
+      }, [date, fetchApod])
+
+      const handleDateChange = (next) => {
+        if (next) setDate(next)
+      }
+
+      const handleRetry = () => fetchApod(date)
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <Masthead date={date} onDateChange={handleDateChange} disabled={loading} />
+
+          <main className="flex-1">
+            {error && <ErrorBanner message={error} onRetry={handleRetry} />}
+            {loading ? <LoadingSkeleton /> : <ApodArticle key={apod.date} apod={apod} />}
+          </main>
+
+          <Footer />
+        </div>
+      )
+    }
+
+    // ========================================
+    // 렌더링
+    // ========================================
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
