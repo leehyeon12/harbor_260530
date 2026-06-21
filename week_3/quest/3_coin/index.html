@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>코인 시세 대시보드</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script>
+    // 다크모드는 'class' 전략 — <html>에 dark 클래스가 붙으면 dark: 스타일이 켜진다
+    tailwind.config = { darkMode: 'class' }
+  </script>
+  <!-- ⚠️ CDN 버전 전부 고정. Babel은 반드시 7.x (8.x로 올라가면 text/babel 변환이 깨진다) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React
+
+    // ============================================================
+    // ⭐ 즐겨찾기 localStorage 키 + 읽기/쓰기 헬퍼
+    // 값은 코인 id 배열 (예: ['bitcoin', 'solana'])
+    // ============================================================
+    const FAV_KEY = 'coin-favorites'
+
+    // localStorage에서 즐겨찾기 id 배열을 불러온다 (없거나 깨졌으면 빈 배열)
+    function loadFavorites() {
+      try {
+        const raw = localStorage.getItem(FAV_KEY)
+        const arr = JSON.parse(raw)
+        return Array.isArray(arr) ? arr : []
+      } catch (e) {
+        return []
+      }
+    }
+
+    // ============================================================
+    // 🌐 CoinGecko 실시간 시세 API
+    // krw 기준, 7개 코인, 24h 등락률 포함
+    // ============================================================
+    const COINS_URL = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=krw&ids=bitcoin,ethereum,ripple,solana,dogecoin,cardano,tron&price_change_percentage=24h'
+    // 자동 갱신 주기 (CoinGecko 무료 rate limit 고려해 30초 이상 유지)
+    const REFRESH_MS = 30000
+
+    // ============================================================
+    // 🧪 폴백 데이터(MOCK) — fetch 실패 같은 상황을 대비한 백업.
+    // CoinGecko 응답과 "똑같은 모양"이라 카드 컴포넌트는 그대로 동작한다.
+    // ============================================================
+    const MOCK_COINS = [
+      { id: 'bitcoin',  symbol: 'btc',  name: 'Bitcoin',  image: 'https://coin-images.coingecko.com/coins/images/1/large/bitcoin.png',   current_price: 97934699, price_change_percentage_24h: 0.066 },
+      { id: 'ethereum', symbol: 'eth',  name: 'Ethereum', image: 'https://coin-images.coingecko.com/coins/images/279/large/ethereum.png', current_price: 5331200,  price_change_percentage_24h: -1.24 },
+      { id: 'ripple',   symbol: 'xrp',  name: 'XRP',      image: 'https://coin-images.coingecko.com/coins/images/44/large/xrp-symbol-white-128.png', current_price: 3215, price_change_percentage_24h: 2.13 },
+      { id: 'solana',   symbol: 'sol',  name: 'Solana',   image: 'https://coin-images.coingecko.com/coins/images/4128/large/solana.png',  current_price: 213400,   price_change_percentage_24h: 0.82 },
+      { id: 'dogecoin', symbol: 'doge', name: 'Dogecoin', image: 'https://coin-images.coingecko.com/coins/images/5/large/dogecoin.png',   current_price: 298,      price_change_percentage_24h: -3.45 },
+      { id: 'cardano',  symbol: 'ada',  name: 'Cardano',  image: 'https://coin-images.coingecko.com/coins/images/975/large/cardano.png',  current_price: 820,      price_change_percentage_24h: 0 },
+      { id: 'tron',     symbol: 'trx',  name: 'TRON',     image: 'https://coin-images.coingecko.com/coins/images/1094/large/tron-logo.png', current_price: 385,     price_change_percentage_24h: 1.07 },
+    ]
+
+    // ============================================================
+    // 🛠️ 표시용 포맷 함수
+    // ============================================================
+    // 원화 콤마: 97934699 -> "97,934,699"
+    function formatKRW(n) {
+      return n.toLocaleString('ko-KR')
+    }
+    // 등락률: 0.066 -> "+0.07%", -1.24 -> "-1.24%"
+    function formatPct(p) {
+      const sign = p > 0 ? '+' : ''
+      return `${sign}${p.toFixed(2)}%`
+    }
+    // 갱신 시각: Date -> "14:23:05"
+    function formatTime(d) {
+      return d.toLocaleTimeString('ko-KR', { hour12: false })
+    }
+
+    // ============================================================
+    // 🪙 코인 카드 한 개
+    // ============================================================
+    function CoinCard({ coin, isFavorite, onToggleFavorite }) {
+      const pct = coin.price_change_percentage_24h
+      const up = pct > 0
+      const down = pct < 0
+
+      // 💡 미션 2의 핵심: 등락률 "배지"에만 색을 입힌다 (양수=초록 / 음수=빨강 / 0=회색)
+      const badgeStyle = up
+        ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+        : down
+        ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
+        : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-300'
+      const arrow = up ? '▲' : down ? '▼' : '–'
+
+      return (
+        <div className="bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 p-5 shadow-sm flex flex-col gap-3">
+          {/* 로고 + 이름 + 심볼 */}
+          <div className="flex items-center gap-2">
+            <img
+              src={coin.image}
+              alt={coin.name}
+              className="w-7 h-7 rounded-full"
+              onError={(e) => { e.target.style.display = 'none' }}
+            />
+            <span className="font-semibold text-gray-900 dark:text-white">{coin.name}</span>
+            <span className="text-xs uppercase text-gray-400 ml-auto">{coin.symbol}</span>
+            {/* ⭐ 즐겨찾기 토글 — 채워진 별/빈 별 */}
+            <button
+              onClick={() => onToggleFavorite(coin.id)}
+              className="text-lg leading-none hover:scale-110 transition-transform"
+              title={isFavorite ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+              aria-label={isFavorite ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+              aria-pressed={isFavorite}
+            >
+              {isFavorite ? '⭐' : '☆'}
+            </button>
+          </div>
+
+          {/* 현재가 (기본색 — 색 안 입힘) */}
+          <div className="text-2xl font-bold text-gray-900 dark:text-white">
+            {formatKRW(coin.current_price)}
+            <span className="text-sm font-normal text-gray-400 ml-1">원</span>
+          </div>
+
+          {/* 24시간 등락률 배지 (여기에만 색) */}
+          <span className={`self-start text-sm font-semibold px-2 py-0.5 rounded-lg ${badgeStyle}`}>
+            {arrow} {formatPct(pct)}
+          </span>
+        </div>
+      )
+    }
+
+    // ============================================================
+    // 🚀 App
+    // ============================================================
+    function App() {
+      const [dark, setDark] = useState(true)               // 테마 (기본 다크)
+      const [coins, setCoins] = useState([])               // 코인 데이터 (CoinGecko fetch로 채움)
+      const [loading, setLoading] = useState(true)         // 첫 로딩 여부 (자동 갱신 땐 켜지 않음)
+      const [error, setError] = useState(null)             // 에러 메시지 (실패 시)
+      const [lastUpdated, setLastUpdated] = useState(null) // 마지막 갱신 시각 (Date)
+      const [favorites, setFavorites] = useState(loadFavorites) // ⭐ 즐겨찾기 id 배열 (localStorage에서 초기화)
+      const [query, setQuery] = useState('')               // 🔍 검색어
+
+      // dark 상태 -> <html>에 dark 클래스 반영
+      useEffect(() => {
+        document.documentElement.classList.toggle('dark', dark)
+      }, [dark])
+
+      // 🌐 CoinGecko에서 시세를 불러온다
+      // isFirst=true(첫 로드/수동 새로고침)면 스피너를 띄우고,
+      // 자동 갱신(isFirst=false)에서는 화면을 가리지 않고 조용히 교체한다.
+      async function loadCoins(isFirst) {
+        if (isFirst) {
+          setLoading(true)
+          setError(null)
+        }
+        try {
+          const res = await fetch(COINS_URL)
+          if (!res.ok) throw new Error('status ' + res.status)
+          const data = await res.json()
+          setCoins(data)
+          setLastUpdated(new Date())
+          setError(null)
+        } catch (e) {
+          // 첫 로드 실패면 에러 화면을 보여준다.
+          // 자동 갱신 실패는 기존 데이터를 유지한 채 조용히 넘어간다.
+          if (isFirst) setError('시세를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.')
+        } finally {
+          if (isFirst) setLoading(false)
+        }
+      }
+
+      // 🚀 첫 로드 + 30초마다 자동 갱신 (언마운트 시 정리)
+      useEffect(() => {
+        loadCoins(true)
+        const timer = setInterval(() => loadCoins(false), REFRESH_MS)
+        return () => clearInterval(timer)
+      }, [])
+
+      // ⭐ 즐겨찾기 변경 시 localStorage에 저장 (새로고침해도 유지)
+      useEffect(() => {
+        localStorage.setItem(FAV_KEY, JSON.stringify(favorites))
+      }, [favorites])
+
+      // ⭐ 별 클릭 — 이미 있으면 제거, 없으면 추가
+      function toggleFavorite(id) {
+        setFavorites((prev) =>
+          prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+        )
+      }
+
+      // 🔍 검색 필터 + ⭐ 즐겨찾기 상단 고정 정렬
+      const visibleCoins = useMemo(() => {
+        const q = query.trim().toLowerCase()
+        // 1) 검색어로 필터 (name 또는 symbol에 포함, 대소문자 무시)
+        const filtered = q
+          ? coins.filter(
+              (c) =>
+                c.name.toLowerCase().includes(q) ||
+                c.symbol.toLowerCase().includes(q)
+            )
+          : coins
+        // 2) 즐겨찾기를 앞으로 정렬 (원래 순서는 유지)
+        return [...filtered].sort((a, b) => {
+          const af = favorites.includes(a.id) ? 0 : 1
+          const bf = favorites.includes(b.id) ? 0 : 1
+          return af - bf
+        })
+      }, [coins, query, favorites])
+
+      return (
+        <div className="min-h-screen bg-gray-50 dark:bg-gray-900 transition-colors">
+          <main className="max-w-3xl mx-auto px-4 py-6">
+            {/* 상단바 */}
+            <header className="flex items-center gap-3 mb-6">
+              <h1 className="text-xl font-bold text-gray-900 dark:text-white">📈 코인 시세 대시보드</h1>
+              <div className="ml-auto flex items-center gap-2">
+                <span className="text-xs text-gray-400 hidden sm:inline">
+                  {lastUpdated ? `마지막 갱신: ${formatTime(lastUpdated)}` : '갱신 대기 중…'}
+                </span>
+                {/* 새로고침 — 수동으로 즉시 재호출 (첫 로드처럼 처리) */}
+                <button
+                  onClick={() => loadCoins(true)}
+                  className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-gray-700 text-sm"
+                  title="새로고침"
+                >🔄</button>
+                {/* 테마 토글 */}
+                <button
+                  onClick={() => setDark((d) => !d)}
+                  className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-gray-700 text-sm"
+                  title="라이트/다크 전환"
+                >
+                  {dark ? '☀️' : '🌙'}
+                </button>
+              </div>
+            </header>
+
+            {/* 🔍 검색창 — 코인 이름 / 심볼 실시간 필터 */}
+            <div className="mb-6">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="코인 이름 또는 심볼 검색 (예: bitcoin, btc)"
+                className="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                aria-label="코인 검색"
+              />
+            </div>
+
+            {/* 상태별 화면 분기: 첫 로딩 / 에러 / 검색결과 없음 / 카드 그리드 */}
+            {loading ? (
+              // 첫 로딩 — 스피너 (자동 갱신 때는 여기로 안 옴)
+              <div className="flex flex-col items-center justify-center text-gray-400 py-20 gap-3">
+                <div className="w-8 h-8 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin"></div>
+                <span>불러오는 중…</span>
+              </div>
+            ) : error ? (
+              // 에러 — 메시지 + 다시 시도
+              <div className="flex flex-col items-center justify-center text-center py-20 gap-4">
+                <p className="text-red-500">⚠️ {error}</p>
+                <button
+                  onClick={() => loadCoins(true)}
+                  className="px-4 py-2 rounded-lg bg-blue-500 hover:bg-blue-600 text-white text-sm font-semibold"
+                >다시 시도</button>
+              </div>
+            ) : visibleCoins.length === 0 ? (
+              <div className="text-center text-gray-400 py-16">
+                🔍 검색 결과가 없습니다
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {visibleCoins.map((c) => (
+                  <CoinCard
+                    key={c.id}
+                    coin={c}
+                    isFavorite={favorites.includes(c.id)}
+                    onToggleFavorite={toggleFavorite}
+                  />
+                ))}
+              </div>
+            )}
+
+            <footer className="text-center text-gray-400 text-xs mt-8">
+              🌐 CoinGecko 실시간 시세 · 30초마다 자동 갱신
+            </footer>
+          </main>
+        </div>
+      )
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
