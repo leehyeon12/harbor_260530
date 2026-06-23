@@ -1,4 +1,7 @@
 .DS_Store
 
+# 실제 API 키가 든 환경변수 파일 — 모든 하위 폴더에서 깃에 올리지 않는다
+**/.env
+
 # Claude Code 런타임 임시 파일 (세션/PID 정보)
 .claude/scheduled_tasks.lock

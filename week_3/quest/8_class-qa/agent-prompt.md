@@ -34,8 +34,8 @@
    - 각 퀘스트 폴더의 README.md
 2. 코드 컨텍스트 — 실습 코드
    - week_1 ~ week_3 폴더의 index.html, server.js 등 실제 실습 파일
-   - 예: 정적 서버 → week_3/webserver-01/server.js,
-     API 라우팅 → webserver-02/server.js, 인증/비밀번호 → webserver-03/server.js
+   - 예: 정적 서버 → week_3/practice/01_webserver-static/server.js,
+     API 라우팅 → week_3/practice/02_webserver-api/server.js, 인증/비밀번호 → week_3/practice/03_webserver-auth/server.js
 
 ## 답변 규칙
 1. 질문을 받으면 먼저 class-notes.md를 Read로 읽어 개념 근거를 확보한다.
