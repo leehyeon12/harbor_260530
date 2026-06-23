@@ -38,9 +38,10 @@
 
     // ============================================================
     // 🌐 CoinGecko 실시간 시세 API
-    // krw 기준, 7개 코인, 24h 등락률 포함
+    // 프론트는 외부 API를 직접 부르지 않고, 같은 폴더 server.js의 프록시만 호출한다.
+    // (실제 CoinGecko 호출 + krw/7개코인/24h 등락률 쿼리는 server.js가 담당)
     // ============================================================
-    const COINS_URL = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=krw&ids=bitcoin,ethereum,ripple,solana,dogecoin,cardano,tron&price_change_percentage=24h'
+    const COINS_URL = '/api/coins'
     // 자동 갱신 주기 (CoinGecko 무료 rate limit 고려해 30초 이상 유지)
     const REFRESH_MS = 30000
 
