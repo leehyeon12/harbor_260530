@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About Me — LEE에게 물어보세요</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <!-- ⚠️ CDN 버전 전부 고정. Babel은 반드시 7.x (8.x로 올라가면 text/babel 변환이 깨진다) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <style>
+    /* 결과 카드가 부드럽게 떠오르는 등장 애니메이션 (Tailwind로 안 되는 부분만 커스텀) */
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .rise { animation: rise 0.35s ease-out; }
+
+    /* 빈 입력으로 전송 시도 시 입력창을 살짝 흔들어 주의를 끈다 */
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60% { transform: translateX(-6px); }
+      40%, 80% { transform: translateX(6px); }
+    }
+    .shake { animation: shake 0.4s ease-in-out; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef } = React
+
+    // ============================================================
+    // 🌐 백엔드 API 계약
+    // 프론트는 외부 AI API를 직접 부르지 않고, 오직 내 서버의 /api/ask만 호출한다.
+    // (키 노출 방지 — AI 호출은 전부 서버에서 일어난다)
+    //   요청 : POST /api/ask  { question: "질문" }
+    //   성공 : { answer: "답변 문자열" }
+    //   실패 : { error: "메시지" }  (HTTP 200이 아닐 수 있음 → res.ok로 분기)
+    // ============================================================
+    const ASK_URL = '/api/ask'
+
+    // 예시 질문 칩 — 클릭하면 입력창에 자동으로 채워진다
+    const SAMPLE_QUESTIONS = [
+      '경력이 어떻게 되나요?',
+      '강점은 뭔가요?',
+      '어떤 일을 해왔나요?',
+      '취미가 뭐예요?',
+      '일할 때 중요하게 생각하는 건?',
+    ]
+
+    // ============================================================
+    // 🎨 디자인 시스템 — 순수 표현용 컴포넌트
+    // ============================================================
+
+    // 기본 버튼 (variant로 색만 분기)
+    function Button({ variant = 'primary', className = '', children, ...rest }) {
+      const base = 'inline-flex items-center justify-center font-semibold rounded-xl transition-colors cursor-pointer disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-50'
+      const styles = {
+        // 항상 쨍한 토스 블루 + hover 진한 블루 (빈 입력 가드는 disabled 대신 ask() 로직에서 처리)
+        primary: 'bg-[#3182F6] text-white hover:bg-[#1B64DA] focus:ring-[#3182F6] px-5 py-3',
+        ghost: 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 focus:ring-slate-300 px-3 py-2 text-sm disabled:opacity-40',
+      }
+      return (
+        <button className={`${base} ${styles[variant]} ${className}`} {...rest}>
+          {children}
+        </button>
+      )
+    }
+
+    // 카드 컨테이너
+    function Card({ className = '', children }) {
+      return (
+        <div className={`rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>
+          {children}
+        </div>
+      )
+    }
+
+    // 예시 질문 칩 — 클릭 시 입력창을 채운다
+    function QuestionChip({ text, onPick, disabled }) {
+      return (
+        <button
+          type="button"
+          onClick={() => onPick(text)}
+          disabled={disabled}
+          className="text-sm px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 cursor-pointer hover:bg-[#E8F3FF] hover:border-[#3182F6] hover:text-[#3182F6] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {text}
+        </button>
+      )
+    }
+
+    // ============================================================
+    // 💬 답변 카드 — 응답이 오면 직전 질문 + result.answer를 보여준다
+    // ============================================================
+    function AnswerCard({ question, answer }) {
+      return (
+        <Card className="rise p-6">
+          {/* 직전 질문 */}
+          <div className="flex items-start gap-2 mb-4">
+            <span className="shrink-0 text-xs font-bold px-2 py-1 rounded-md bg-slate-900 text-white">Q</span>
+            <p className="text-base font-medium text-slate-800 leading-relaxed">{question}</p>
+          </div>
+          {/* 답변 본문 */}
+          <div className="flex items-start gap-2">
+            <span className="shrink-0 text-xs font-bold px-2 py-1 rounded-md bg-emerald-600 text-white">A</span>
+            {/* whitespace-pre-wrap: 서버가 줄바꿈을 포함해 보내도 그대로 표시 */}
+            <p className="text-base text-slate-700 leading-relaxed whitespace-pre-wrap">{answer}</p>
+          </div>
+        </Card>
+      )
+    }
+
+    // 에러 카드
+    function ErrorCard({ message, onDismiss }) {
+      return (
+        <Card className="rise p-6 border-rose-200 bg-rose-50">
+          <p className="text-sm font-semibold text-rose-700 mb-1">답변을 받지 못했어요</p>
+          <p className="text-sm text-rose-600 mb-4">{message}</p>
+          <Button variant="ghost" onClick={onDismiss} className="border-rose-200 text-rose-600 hover:bg-rose-100">
+            닫기
+          </Button>
+        </Card>
+      )
+    }
+
+    // ============================================================
+    // 🚀 App
+    // ============================================================
+    function App() {
+      const [question, setQuestion] = useState('')    // 입력창 내용
+      const [asked, setAsked]       = useState('')    // 실제 전송된 질문 (답변과 함께 표시)
+      const [answer, setAnswer]     = useState(null)  // 성공 응답의 answer 문자열
+      const [loading, setLoading]   = useState(false) // 답변 받는 중 여부
+      const [error, setError]       = useState(null)  // 에러 메시지
+      const [shaking, setShaking]   = useState(false)  // 빈 입력 가드용 흔들기 효과
+      const inputRef = useRef(null)                    // 입력창 포커스용 ref
+
+      // 💬 질문 전송 — try/catch/finally 비동기 패턴
+      async function ask() {
+        // 로딩 중이면 중복 전송 방지
+        if (loading) return
+        const q = question.trim()
+        // 빈 입력 가드: 에러 카드 대신 입력창 포커스 + 살짝 흔들어 주의만 끈다
+        if (q.length === 0) {
+          inputRef.current && inputRef.current.focus()
+          setShaking(true)
+          setTimeout(() => setShaking(false), 400)
+          return
+        }
+        setLoading(true)
+        setError(null)
+        setAnswer(null)
+        setAsked(q)
+        try {
+          const res = await fetch(ASK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: q }),
+          })
+          // HTTP 200이 아닐 수 있다 → res.ok로 분기, 본문의 error 메시지 사용
+          const data = await res.json().catch(() => ({}))
+          if (!res.ok) {
+            throw new Error(data.error || '답변을 받아오지 못했습니다.')
+          }
+          setAnswer(data.answer || '')
+        } catch (e) {
+          setError(e.message || '알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.')
+        } finally {
+          setLoading(false)
+        }
+      }
+
+      // Enter로 전송 (단일 입력창이므로 단순 처리)
+      function onKeyDown(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          ask()
+        }
+      }
+
+      // 예시 칩 클릭 → 입력창 채우기 (바로 전송하지 않고 사용자가 확인 후 보내도록)
+      function pickSample(text) {
+        setQuestion(text)
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-50 text-slate-900">
+          <main className="max-w-2xl mx-auto px-4 py-10 sm:py-16">
+            {/* 헤더 */}
+            <header className="mb-8">
+              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+                About Me <span className="text-slate-400">— <span className="text-[#3182F6]">LEE</span>에게 물어보세요</span>
+              </h1>
+              <p className="mt-2 text-sm sm:text-base text-slate-500">
+                LEE에 대해 궁금한 점을 입력하면, 소개 자료를 근거로 답해드려요.
+              </p>
+            </header>
+
+            {/* 입력 영역 */}
+            <Card className="p-5 sm:p-6 mb-5">
+              <label htmlFor="question" className="block text-sm font-medium text-slate-700 mb-2">
+                질문하기
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  ref={inputRef}
+                  id="question"
+                  type="text"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  disabled={loading}
+                  placeholder="예) 경력이 어떻게 되나요?"
+                  className={`flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-base placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-400 disabled:opacity-50 ${shaking ? 'shake' : ''}`}
+                  aria-label="LEE에게 할 질문"
+                />
+                <Button onClick={ask} className="sm:w-auto w-full">
+                  {loading ? '물어보는 중…' : '질문하기'}
+                </Button>
+              </div>
+
+              {/* 예시 질문 칩 */}
+              <div className="mt-4">
+                <p className="text-xs text-slate-400 mb-2">이런 걸 물어볼 수 있어요</p>
+                <div className="flex flex-wrap gap-2">
+                  {SAMPLE_QUESTIONS.map((q) => (
+                    <QuestionChip key={q} text={q} onPick={pickSample} disabled={loading} />
+                  ))}
+                </div>
+              </div>
+            </Card>
+
+            {/* 상태별 화면 분기: 로딩 / 에러 / 답변 / 빈 상태 */}
+            {loading ? (
+              <Card className="p-6 flex items-center gap-3 text-slate-500">
+                <span className="inline-block w-4 h-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" />
+                <span className="text-sm">답변을 생각하고 있어요…</span>
+              </Card>
+            ) : error ? (
+              <ErrorCard message={error} onDismiss={() => setError(null)} />
+            ) : answer !== null ? (
+              <AnswerCard question={asked} answer={answer} />
+            ) : (
+              // 빈 상태 — 아직 질문 전
+              <p className="text-center text-sm text-slate-400 py-8">
+                위에 질문을 입력하거나 예시를 눌러 시작해 보세요.
+              </p>
+            )}
+
+            <footer className="text-center text-xs text-slate-400 mt-12">
+              About Me Q&amp;A · 답변은 LEE 소개 자료를 근거로 AI가 생성합니다
+            </footer>
+          </main>
+        </div>
+      )
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
