@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>할 일 목록</title>
+
+  <!-- Tailwind CSS (버전 고정) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+
+  <!--
+    ⚠️ 모든 CDN은 버전을 명시적으로 고정한다.
+    미고정 시 @babel/standalone 이 최신(8.x)으로 올라가 type="text/babel"
+    인라인 변환이 통째로 깨진다. Babel 은 반드시 7.x 로 고정.
+  -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+</head>
+<body class="bg-gradient-to-br from-slate-100 to-slate-200 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 추출
+    // ========================================
+    const { useState, useEffect, useMemo } = React
+
+    // ========================================
+    // 💾 localStorage 데이터 계층 (서버 없음)
+    // ========================================
+    // 저장 키: 'todos' / 값: JSON.stringify(배열)
+    // 항목 구조: { id: number, text: string, done: boolean }
+    const STORAGE_KEY = 'todos'
+
+    // 첫 방문 시 넣어줄 시드 데이터
+    const SEED_TODOS = [
+      { id: 1, text: '할 일 1: 아침 운동 40분 하기', done: false },
+      { id: 2, text: '할 일 2: 이메일 확인하고 답장하기', done: false },
+      { id: 3, text: '할 일 3: 강의 복습 및 퀘스트 진행하기', done: false },
+      { id: 4, text: '할 일 4: 장보기 (계란, 우유, 채소)', done: false },
+      { id: 5, text: '할 일 5: 잠들기 전 책 20쪽 읽기', done: false },
+      { id: 6, text: '할 일 6: 밥먹기', done: false },
+    ]
+
+    // localStorage 에서 todos 읽기.
+    // - 값이 없으면(첫 방문) 시드 데이터를 저장하고 반환.
+    // - JSON 파싱이 깨지면 try/catch 로 잡아 빈 배열 처리.
+    const loadTodosFromStorage = () => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY)
+        if (raw === null) {
+          // 첫 방문: 시드 데이터를 즉시 저장
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(SEED_TODOS))
+          return SEED_TODOS
+        }
+        const parsed = JSON.parse(raw)
+        return Array.isArray(parsed) ? parsed : []
+      } catch (e) {
+        // 깨진 값은 빈 배열로 안전 처리
+        return []
+      }
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트 (순수 프레젠테이션)
+    // ========================================
+
+    // 카드 래퍼: 그림자 + 둥근 모서리
+    function Card({ children, className = '' }) {
+      return (
+        <div className={`bg-white rounded-2xl shadow-xl ${className}`}>
+          {children}
+        </div>
+      )
+    }
+
+    // 배지: 개수 표시 등에 사용
+    function Badge({ children, className = '' }) {
+      return (
+        <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${className}`}>
+          {children}
+        </span>
+      )
+    }
+
+    // 입력창: 라벨 없이 placeholder 기반 (controlled)
+    function Input({ value, onChange, onKeyDown, placeholder, disabled }) {
+      return (
+        <input
+          type="text"
+          value={value}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="flex-1 min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700
+            placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300
+            focus:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+      )
+    }
+
+    // 버튼: variant(primary)·disabled 지원하는 작은 프리미티브
+    function Button({ children, onClick, disabled, type = 'button', className = '' }) {
+      return (
+        <button
+          type={type}
+          onClick={onClick}
+          disabled={disabled}
+          className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors
+            disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // ========================================
+    // 🧩 상태별 표시 컴포넌트
+    // ========================================
+
+    // 항목 없음 상태
+    function EmptyState() {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
+          <div className="text-4xl">📭</div>
+          <p className="text-sm">등록된 할 일이 없어요</p>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 Todo 항목 컴포넌트
+    // ========================================
+    // done 은 로컬 상태(todo.done)를 그대로 반영한다.
+    function TodoItem({ todo, onToggle, onDelete }) {
+      const done = todo.done
+      return (
+        <li className="group flex items-center gap-2">
+          <label
+            className={`flex flex-1 min-w-0 items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-colors select-none
+              ${done ? 'bg-slate-50' : 'hover:bg-slate-50'}`}
+          >
+            {/* 체크박스: 토글 시 로컬 상태만 변경 (localStorage 자동 저장) */}
+            <input
+              type="checkbox"
+              checked={done}
+              onChange={() => onToggle(todo)}
+              className="w-5 h-5 rounded accent-indigo-500 cursor-pointer shrink-0"
+            />
+            <span
+              className={`truncate text-slate-700 transition-all
+                ${done ? 'line-through text-slate-400 opacity-60' : ''}`}
+            >
+              {todo.text}
+            </span>
+          </label>
+
+          {/* 삭제 버튼: 클릭 시 로컬 목록에서 제거 */}
+          <button
+            type="button"
+            onClick={() => onDelete(todo)}
+            aria-label={`"${todo.text}" 삭제`}
+            className="shrink-0 px-3 py-2 rounded-lg text-sm font-medium text-slate-400
+              hover:text-red-600 hover:bg-red-50 transition-colors
+              sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+          >
+            삭제
+          </button>
+        </li>
+      )
+    }
+
+    // ========================================
+    // 📄 페이지 컴포넌트 (비즈니스 로직)
+    // ========================================
+    function TodoApp() {
+      // 초기값을 localStorage 에서 바로 읽어 온다 (지연 초기화)
+      const [todos, setTodos] = useState(() => loadTodosFromStorage())
+      const [text, setText] = useState('') // 입력창 값 (controlled)
+
+      // todos 가 바뀔 때마다 localStorage 에 즉시 저장
+      useEffect(() => {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(todos))
+      }, [todos])
+
+      // 추가: 새 id = (현재 최대 id)+1, 비면 1. 빈 입력 차단.
+      const handleAdd = () => {
+        const value = text.trim()
+        if (!value) return // 빈 입력 차단
+
+        setTodos((prev) => {
+          const nextId = prev.length > 0
+            ? Math.max(...prev.map((t) => t.id)) + 1
+            : 1
+          return [...prev, { id: nextId, text: value, done: false }]
+        })
+        setText('') // 입력창 비우기
+      }
+
+      // 입력창 Enter 키로도 추가
+      const handleKeyDown = (e) => {
+        if (e.key === 'Enter') handleAdd()
+      }
+
+      // 토글: 해당 항목 done 뒤집기 (localStorage 자동 저장)
+      const handleToggle = (todo) => {
+        setTodos((prev) =>
+          prev.map((t) => (t.id === todo.id ? { ...t, done: !t.done } : t))
+        )
+      }
+
+      // 삭제: 목록에서 제거 (localStorage 자동 저장)
+      const handleDelete = (todo) => {
+        setTodos((prev) => prev.filter((t) => t.id !== todo.id))
+      }
+
+      // 전체/완료 개수 계산
+      const total = todos.length
+      const doneCount = useMemo(
+        () => todos.filter((t) => t.done).length,
+        [todos]
+      )
+
+      return (
+        <main className="max-w-lg mx-auto px-4 py-10 sm:py-16">
+          <Card className="overflow-hidden">
+            {/* 헤더 */}
+            <header className="px-6 py-6 bg-gradient-to-r from-indigo-500 to-violet-500 text-white">
+              <h1 className="text-2xl font-bold tracking-tight">할 일 목록</h1>
+              <p className="text-indigo-100 text-sm mt-1">브라우저(localStorage)에 저장됩니다</p>
+
+              {/* 전체/완료 개수 배지 */}
+              {total > 0 && (
+                <div className="flex gap-2 mt-4">
+                  <Badge className="bg-white/20 text-white">
+                    전체 {total}개
+                  </Badge>
+                  <Badge className="bg-white/20 text-white">
+                    완료 {doneCount}개
+                  </Badge>
+                </div>
+              )}
+            </header>
+
+            {/* 입력 영역: 추가 */}
+            <div className="px-6 pt-5">
+              <div className="flex gap-2">
+                <Input
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="할 일을 입력하세요"
+                />
+                <Button
+                  onClick={handleAdd}
+                  disabled={text.trim() === ''}
+                  className="bg-indigo-500 hover:bg-indigo-600 text-white shrink-0"
+                >
+                  추가
+                </Button>
+              </div>
+            </div>
+
+            {/* 본문: 빈 목록 / 목록 */}
+            <div className="px-6 py-4">
+              {total === 0 && <EmptyState />}
+
+              {total > 0 && (
+                <ul className="flex flex-col gap-1 py-2">
+                  {todos.map((todo) => (
+                    <TodoItem
+                      key={todo.id}
+                      todo={todo}
+                      onToggle={handleToggle}
+                      onDelete={handleDelete}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Card>
+
+          {/* 푸터 안내 */}
+          <p className="text-center text-xs text-slate-400 mt-6">
+            체크 상태와 추가·삭제 내용은 이 브라우저(localStorage)에 저장됩니다.
+          </p>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 🚀 App + 렌더링
+    // ========================================
+    function App() {
+      return <TodoApp />
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
