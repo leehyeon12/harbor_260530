@@ -34,5 +34,6 @@
 - **개별 구매:** 스파게티 면(파스타) / 계란·참기름·깨소금(볶음밥) / 김치·돼지고기·두부·고춧가루(김치찌개)
 
 ## 만든 방법
-- 사용 에이전트: **레시피 에이전트** (`.claude/agents/recipe-agent.md`)
+- 사용 에이전트: **quick-recipe-creator** (`.claude/agents/quick-recipe-creator.md`)
+  — 이 레시피 북은 W1 당시 `recipe-agent`로 작성했고(공통재료 최적화 컨셉), 이후 레시피 에이전트를 `quick-recipe-creator`로 일원화했습니다.
 - 정통 레시피를 요청한 뒤, "재료를 최대한 공유해 효율적으로 소비"라는 나만의 방향으로 다듬었습니다.
