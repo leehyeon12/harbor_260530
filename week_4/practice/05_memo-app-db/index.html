@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>내 메모장</title>
+
+  <!-- Tailwind CSS (버전 고정) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+
+  <!--
+    ⚠️ 모든 CDN은 버전을 명시적으로 고정한다.
+    미고정 시 @babel/standalone 이 최신(8.x)으로 올라가 type="text/babel"
+    인라인 변환이 통째로 깨진다. Babel 은 반드시 7.x 로 고정.
+  -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+</head>
+<body class="bg-gradient-to-br from-slate-100 to-slate-200 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 추출
+    // ========================================
+    const { useState, useEffect, useMemo, useRef } = React
+
+    // 같은 출처(same-origin)로 서빙되므로 상대경로 사용 (localhost 하드코딩 금지)
+    const API_BASE_URL = '/api'
+
+    // created_at 을 한국어로 보기좋게 포맷
+    const formatDate = (value) => {
+      if (!value) return ''
+      const d = new Date(value)
+      if (isNaN(d.getTime())) return ''
+      return d.toLocaleString('ko-KR')
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트 (순수 프레젠테이션)
+    // ========================================
+
+    // 카드 래퍼: 그림자 + 둥근 모서리
+    function Card({ children, className = '' }) {
+      return (
+        <div className={`bg-white rounded-2xl shadow-xl ${className}`}>
+          {children}
+        </div>
+      )
+    }
+
+    // 배지: 개수 표시 등에 사용
+    function Badge({ children, className = '' }) {
+      return (
+        <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${className}`}>
+          {children}
+        </span>
+      )
+    }
+
+    // 스피너: 로딩 인디케이터
+    function Spinner() {
+      return (
+        <div
+          className="w-8 h-8 border-4 border-slate-200 border-t-indigo-500 rounded-full animate-spin"
+          role="status"
+          aria-label="로딩 중"
+        />
+      )
+    }
+
+    // 입력창: placeholder 기반 단일 라인 (controlled)
+    function Input({ value, onChange, onKeyDown, placeholder, disabled, className = '' }) {
+      return (
+        <input
+          type="text"
+          value={value}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          disabled={disabled}
+          className={`min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700
+            placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300
+            focus:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        />
+      )
+    }
+
+    // 여러 줄 입력: 메모 내용용 (controlled)
+    function Textarea({ value, onChange, placeholder, disabled, rows = 3, className = '' }) {
+      return (
+        <textarea
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          disabled={disabled}
+          rows={rows}
+          className={`w-full min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700
+            placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300
+            focus:border-indigo-300 transition resize-y disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        />
+      )
+    }
+
+    // 버튼: variant·disabled 지원하는 작은 프리미티브
+    function Button({ children, onClick, disabled, type = 'button', className = '' }) {
+      return (
+        <button
+          type={type}
+          onClick={onClick}
+          disabled={disabled}
+          className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors
+            disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // ========================================
+    // 🧩 상태별 표시 컴포넌트
+    // ========================================
+
+    // 로딩 상태
+    function LoadingState() {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-slate-500">
+          <Spinner />
+          <p className="text-sm">메모를 불러오는 중...</p>
+        </div>
+      )
+    }
+
+    // 에러 상태
+    function ErrorState({ message, onRetry }) {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
+          <div className="text-4xl">⚠️</div>
+          <p className="text-red-600 font-medium">불러오기에 실패했어요</p>
+          <p className="text-sm text-slate-500 max-w-xs break-words">{message}</p>
+          <button
+            onClick={onRetry}
+            className="mt-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-sm font-semibold transition-colors"
+          >
+            다시 시도
+          </button>
+        </div>
+      )
+    }
+
+    // 항목 없음 상태 (검색 여부에 따라 안내 문구 변경)
+    function EmptyState({ searching }) {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
+          <div className="text-4xl">{searching ? '🔍' : '📝'}</div>
+          <p className="text-sm">
+            {searching ? '검색 결과가 없어요' : '작성된 메모가 없어요'}
+          </p>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 메모 카드 컴포넌트
+    // ========================================
+    // 보기 모드 ↔ 인라인 편집 모드를 자체 상태로 토글한다.
+    function MemoItem({ memo, onSave, onDelete, busy }) {
+      const [editing, setEditing] = useState(false)        // 편집 모드 여부
+      const [editTitle, setEditTitle] = useState(memo.title)
+      const [editContent, setEditContent] = useState(memo.content || '')
+
+      // 편집 시작: 현재 값으로 입력 필드 초기화
+      const startEdit = () => {
+        setEditTitle(memo.title)
+        setEditContent(memo.content || '')
+        setEditing(true)
+      }
+
+      // 취소: 원복 후 보기 모드로
+      const cancelEdit = () => {
+        setEditing(false)
+      }
+
+      // 저장: 부모에 PUT 요청을 위임, 성공하면 보기 모드로 전환
+      const handleSave = () => {
+        const title = editTitle.trim()
+        if (!title || busy) return
+        onSave(memo, { title, content: editContent }, () => setEditing(false))
+      }
+
+      // ----- 편집 모드 -----
+      if (editing) {
+        return (
+          <li className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-4">
+            <Input
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              placeholder="제목"
+              disabled={busy}
+              className="w-full mb-2"
+            />
+            <Textarea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              placeholder="내용"
+              disabled={busy}
+              rows={4}
+              className="mb-3"
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                onClick={cancelEdit}
+                disabled={busy}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-600"
+              >
+                취소
+              </Button>
+              <Button
+                onClick={handleSave}
+                disabled={busy || editTitle.trim() === ''}
+                className="bg-indigo-500 hover:bg-indigo-600 text-white"
+              >
+                {busy ? '저장 중…' : '저장'}
+              </Button>
+            </div>
+          </li>
+        )
+      }
+
+      // ----- 보기 모드 -----
+      return (
+        <li className="group rounded-xl border border-slate-100 hover:border-slate-200 hover:bg-slate-50/60 transition-colors p-4">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-semibold text-slate-800 break-words flex-1 min-w-0">
+              {memo.title}
+            </h3>
+            <div className="flex shrink-0 gap-1 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <button
+                type="button"
+                onClick={startEdit}
+                disabled={busy}
+                aria-label={`"${memo.title}" 수정`}
+                className="px-2.5 py-1.5 rounded-lg text-sm font-medium text-slate-400
+                  hover:text-indigo-600 hover:bg-indigo-50 transition-colors
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                수정
+              </button>
+              <button
+                type="button"
+                onClick={() => onDelete(memo)}
+                disabled={busy}
+                aria-label={`"${memo.title}" 삭제`}
+                className="px-2.5 py-1.5 rounded-lg text-sm font-medium text-slate-400
+                  hover:text-red-600 hover:bg-red-50 transition-colors
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                삭제
+              </button>
+            </div>
+          </div>
+
+          {/* 내용: 여러 줄 그대로 보존 */}
+          {memo.content && (
+            <p className="mt-2 text-sm text-slate-600 whitespace-pre-wrap break-words">
+              {memo.content}
+            </p>
+          )}
+
+          {/* 작성 시각 */}
+          <p className="mt-3 text-xs text-slate-400">
+            {formatDate(memo.created_at)}
+          </p>
+        </li>
+      )
+    }
+
+    // ========================================
+    // 📄 페이지 컴포넌트 (비즈니스 로직)
+    // ========================================
+    function MemoApp() {
+      const [memos, setMemos] = useState([])        // 서버에서 받아온 목록 (최신순)
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)      // 최초/재조회 실패 (전체 화면 에러)
+      const [actionError, setActionError] = useState(null) // 추가/수정/삭제 액션 에러 (배너)
+
+      // 작성 폼 상태
+      const [title, setTitle] = useState('')
+      const [content, setContent] = useState('')
+      const [adding, setAdding] = useState(false)
+
+      // 검색 상태
+      const [query, setQuery] = useState('')        // 입력창 값
+      const [activeQuery, setActiveQuery] = useState('') // 실제 적용된(디바운스된) 검색어
+
+      const [busyIds, setBusyIds] = useState(new Set()) // 수정/삭제 진행 중인 id 집합
+
+      // 특정 id 의 진행 상태 on/off
+      const setBusy = (id, on) => {
+        setBusyIds((prev) => {
+          const next = new Set(prev)
+          if (on) next.add(id)
+          else next.delete(id)
+          return next
+        })
+      }
+
+      // /api/memos 목록 조회 (검색어가 있으면 ?q= 로 전달)
+      const loadMemos = (q = '') => {
+        setLoading(true)
+        setError(null)
+
+        const trimmed = q.trim()
+        const url = trimmed
+          ? `${API_BASE_URL}/memos?q=${encodeURIComponent(trimmed)}`
+          : `${API_BASE_URL}/memos`
+
+        fetch(url)
+          .then((res) => {
+            if (!res.ok) throw new Error(`서버 응답 오류 (${res.status})`)
+            return res.json()
+          })
+          .then((data) => {
+            setMemos(Array.isArray(data) ? data : [])
+          })
+          .catch((err) => {
+            setError(err.message || '알 수 없는 오류')
+          })
+          .finally(() => {
+            setLoading(false)
+          })
+      }
+
+      // 검색어 디바운스(약 300ms): query 가 바뀌면 activeQuery 를 늦게 갱신
+      useEffect(() => {
+        const timer = setTimeout(() => {
+          setActiveQuery(query.trim())
+        }, 300)
+        return () => clearTimeout(timer)
+      }, [query])
+
+      // activeQuery 가 바뀔 때마다 재조회 (최초 마운트 포함)
+      useEffect(() => {
+        loadMemos(activeQuery)
+      }, [activeQuery])
+
+      // 추가: POST /api/memos { title, content }
+      const handleAdd = () => {
+        const t = title.trim()
+        if (!t || adding) return // 제목 비면 차단 / 중복 요청 방지
+
+        setAdding(true)
+        setActionError(null)
+
+        fetch(`${API_BASE_URL}/memos`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: t, content }),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`추가 실패 (${res.status})`)
+            return res.json()
+          })
+          .then((created) => {
+            // 검색 중이 아닐 때만 즉시 목록 맨 위(최신)에 반영
+            if (!activeQuery) {
+              setMemos((prev) => [created, ...prev])
+            }
+            // 폼 초기화
+            setTitle('')
+            setContent('')
+          })
+          .catch((err) => {
+            setActionError(err.message || '추가 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setAdding(false)
+          })
+      }
+
+      // 수정: PUT /api/memos/:id { title, content } — 성공 시 서버 응답으로 카드 갱신
+      const handleSave = (memo, payload, onDone) => {
+        if (busyIds.has(memo.id)) return
+
+        setActionError(null)
+        setBusy(memo.id, true)
+
+        fetch(`${API_BASE_URL}/memos/${memo.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`수정 실패 (${res.status})`)
+            return res.json()
+          })
+          .then((updated) => {
+            setMemos((prev) =>
+              prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m))
+            )
+            if (onDone) onDone() // 편집 모드 종료
+          })
+          .catch((err) => {
+            setActionError(err.message || '수정 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusy(memo.id, false)
+          })
+      }
+
+      // 삭제: DELETE /api/memos/:id — 낙관적 제거 후 실패 시 롤백
+      const handleDelete = (memo) => {
+        if (busyIds.has(memo.id)) return
+
+        setActionError(null)
+        setBusy(memo.id, true)
+
+        // 1) 화면에서 먼저 제거 (낙관적) — 롤백을 위해 원래 위치 기억
+        let removedIndex = -1
+        setMemos((prev) => {
+          removedIndex = prev.findIndex((m) => m.id === memo.id)
+          return prev.filter((m) => m.id !== memo.id)
+        })
+
+        fetch(`${API_BASE_URL}/memos/${memo.id}`, { method: 'DELETE' })
+          .then((res) => {
+            if (!res.ok) throw new Error(`삭제 실패 (${res.status})`)
+            return res.json()
+          })
+          .catch((err) => {
+            // 2) 실패 시 원래 위치로 복구 + 에러 표시
+            setMemos((prev) => {
+              const next = [...prev]
+              const at = removedIndex >= 0 ? removedIndex : next.length
+              next.splice(at, 0, memo)
+              return next
+            })
+            setActionError(err.message || '삭제 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusy(memo.id, false)
+          })
+      }
+
+      const total = memos.length
+      const searching = activeQuery !== ''
+
+      return (
+        <main className="max-w-lg mx-auto px-4 py-10 sm:py-16">
+          <Card className="overflow-hidden">
+            {/* 헤더 */}
+            <header className="px-6 py-6 bg-gradient-to-r from-indigo-500 to-violet-500 text-white">
+              <h1 className="text-2xl font-bold tracking-tight">내 메모장</h1>
+              <p className="text-indigo-100 text-sm mt-1">떠오르는 생각을 기록하세요</p>
+
+              {/* 전체 메모 개수 배지 (로딩/에러가 아닐 때만) */}
+              {!loading && !error && (
+                <div className="flex gap-2 mt-4">
+                  <Badge className="bg-white/20 text-white">
+                    {searching ? `검색 ${total}개` : `전체 ${total}개`}
+                  </Badge>
+                </div>
+              )}
+            </header>
+
+            {/* 작성 폼 */}
+            <div className="px-6 pt-5">
+              <div className="flex flex-col gap-2">
+                <Input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="제목"
+                  disabled={adding}
+                  className="w-full"
+                />
+                <Textarea
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  placeholder="내용을 입력하세요"
+                  disabled={adding}
+                  rows={3}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    onClick={handleAdd}
+                    disabled={adding || title.trim() === ''}
+                    className="bg-indigo-500 hover:bg-indigo-600 text-white shrink-0"
+                  >
+                    {adding ? '추가 중…' : '메모 추가'}
+                  </Button>
+                </div>
+              </div>
+
+              {/* 액션 에러 배너 (추가/수정/삭제 공통, 닫기 가능) */}
+              {actionError && (
+                <div
+                  role="alert"
+                  className="mt-3 flex items-center justify-between gap-3 px-3 py-2 rounded-lg
+                    bg-red-50 text-red-700 text-sm border border-red-100"
+                >
+                  <span className="break-words">⚠️ {actionError}</span>
+                  <button
+                    onClick={() => setActionError(null)}
+                    aria-label="에러 닫기"
+                    className="shrink-0 text-red-400 hover:text-red-600 font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* 검색창 */}
+              <div className="mt-4">
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="🔍 메모 검색"
+                  className="w-full"
+                />
+              </div>
+            </div>
+
+            {/* 본문: 상태별 분기 */}
+            <div className="px-6 py-4">
+              {loading && <LoadingState />}
+
+              {!loading && error && (
+                <ErrorState message={error} onRetry={() => loadMemos(activeQuery)} />
+              )}
+
+              {!loading && !error && total === 0 && (
+                <EmptyState searching={searching} />
+              )}
+
+              {!loading && !error && total > 0 && (
+                <ul className="flex flex-col gap-3 py-2">
+                  {memos.map((memo) => (
+                    <MemoItem
+                      key={memo.id}
+                      memo={memo}
+                      onSave={handleSave}
+                      onDelete={handleDelete}
+                      busy={busyIds.has(memo.id)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Card>
+
+          {/* 푸터 안내 */}
+          <p className="text-center text-xs text-slate-400 mt-6">
+            메모는 PostgreSQL 데이터베이스에 저장됩니다.
+          </p>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 🚀 App + 렌더링
+    // ========================================
+    function App() {
+      return <MemoApp />
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
