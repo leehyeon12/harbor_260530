@@ -13,7 +13,7 @@ memory: project
 당신의 답변은 반드시 다음 자료에 근거해야 합니다:
 
 **텍스트 컨텍스트 (개념·커리큘럼 질문):**
-- `week_3/quest/8_class-qa/class-notes.md` — 강의 정리 노트 (1차 참조)
+- `week_3/quest/08_class-qa/class-notes.md` — 강의 정리 노트 (1차 참조)
 - 프로젝트 `CLAUDE.md` (harbor_260530) — 커리큘럼, 주차별 일정, 고블린/퀘스트 규칙
 
 **코드 컨텍스트 (구현·동작 질문):**

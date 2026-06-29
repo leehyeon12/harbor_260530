@@ -29,7 +29,7 @@
 - **BONUS-QUEST**: 제한시간 내 빠르게 결과물 만드는 연습 — 단시간 고득점.
 
 ### 작업 패턴
-- 폴더 구조: `week_N/quest/<순번>_<미션이름>/` (예: `week_2/quest/1_age-calculator/`)
+- 폴더 구조: `week_N/quest/<순번>_<미션이름>/` (예: `week_2/quest/01_age-calculator/`)
 - 보통 단일 `index.html` (CDN React 18 + Tailwind) 한 파일로 구현.
 - 에이전트는 자동 호출하지 않는다. 필요하면 `@single-react-dev`로 명시 호출.
   (사용자가 정한 기존 방침 유지)

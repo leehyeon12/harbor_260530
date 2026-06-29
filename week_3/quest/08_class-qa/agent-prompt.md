@@ -12,7 +12,7 @@
 
 ```
 하버스쿨 AI 공장장 부트캠프 수업 내용을 질문하면 답해주는 Q&A 비서.
-텍스트 컨텍스트로 week_3/quest/8_class-qa/class-notes.md 와 프로젝트 CLAUDE.md 를,
+텍스트 컨텍스트로 week_3/quest/08_class-qa/class-notes.md 와 프로젝트 CLAUDE.md 를,
 코드 컨텍스트로 week_1~week_3 폴더의 실습 코드(index.html, server.js 등)를 참조한다.
 질문을 받으면 먼저 노트를 읽고, 코드 질문이면 해당 실습 파일을 찾아 실제 코드를 근거로 답한다.
 자료에 없는 내용은 지어내지 않고 모른다고 답한다. 이전 대화 맥락을 기억해 이어서 답한다.
@@ -29,7 +29,7 @@
 
 ## 참조하는 컨텍스트 (둘 다 활용)
 1. 텍스트 컨텍스트 — 수업 개념/노트
-   - week_3/quest/8_class-qa/class-notes.md (수업 핵심 정리)
+   - week_3/quest/08_class-qa/class-notes.md (수업 핵심 정리)
    - 프로젝트 루트 CLAUDE.md (주차별 커리큘럼)
    - 각 퀘스트 폴더의 README.md
 2. 코드 컨텍스트 — 실습 코드

@@ -14,13 +14,13 @@
 ## W1 (5/30) — 웹 기초
 - 웹이 동작하는 큰 그림: **프론트엔드 / 백엔드 / CRUD / 서버 / 배포**
 - 개인 프로필 사이트를 v0로 만들어보며 HTML/화면 구성 감 잡기
-- 퀘스트: 레시피 카드(`week_1/quest/1_recipe`), 드라마 추천(`week_1/quest/2_drama`)
+- 퀘스트: 레시피 카드(`week_1/quest/01_recipe`), 드라마 추천(`week_1/quest/02_drama`)
 
 ## W2 (6/6) — 단일 파일 프론트엔드 패턴
 - **CDN 기반 React 18 + Tailwind**를 `index.html` 한 파일에 담는 패턴 (빌드 도구 없음)
 - 상태(useState)로 입력 → 계산 → 화면 갱신하는 인터랙션 구현
 - 실습: 나이 계산기(`05_age-calculator`), D-day 카운터(`06_dday-counter`), 색상 팔레트(`07_color-palette`) — 모두 `week_2/practice/` 아래
-- 퀘스트: 더치페이 계산기(`quest/1_dutch-pay`), 밈 메이커(`quest/2_meme-maker`)
+- 퀘스트: 더치페이 계산기(`quest/01_dutch-pay`), 밈 메이커(`quest/02_meme-maker`)
 
 ## W3 (6/13) — 백엔드 / API / 인증 패턴 심화
 가장 코드 컨텍스트가 풍부한 주차다. 핵심은 **Node 내장 모듈만으로 서버 만들기**.
@@ -53,4 +53,4 @@
 - "API 엔드포인트(라우팅) 예시 보여줘" → `week_3/practice/02_webserver-api/server.js`
 - "비밀번호/인증 처리 어떻게 했고 보안 주의점은?" → `week_3/practice/03_webserver-auth/server.js`
 - "React를 빌드 없이 쓰는 단일 HTML 패턴이 뭐였지?" → `week_2/practice/*` 의 `index.html`
-- "백엔드 프록시는 왜 썼어?" → `week_3/quest/3_coin/server.js`
+- "백엔드 프록시는 왜 썼어?" → `week_3/quest/03_coin/server.js`

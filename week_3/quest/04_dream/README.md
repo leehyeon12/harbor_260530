@@ -42,7 +42,7 @@
 
 - **백엔드 `server.js`**: `single-server-specialist` 에이전트
 - **프론트 `index.html`**: `single-react-dev` 에이전트
-- 기존 `week_3/quest/3_coin`의 프록시 패턴을 참고해 동일 구조로 구현
+- 기존 `week_3/quest/03_coin`의 프록시 패턴을 참고해 동일 구조로 구현
 
 ## 제출물
 
