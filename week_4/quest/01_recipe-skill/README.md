@@ -55,11 +55,14 @@ week_4/quest/01_recipe-skill/
 
 ## 제출물 (마감: 금요일 23:59)
 
-- [ ] GitHub repo 링크 (Skill 코드 + JSON 포함)
-- [ ] 생성된 레시피 md 1개 이상 (`recipes/` 안)
-- [ ] `/recipe` 실행 스크린샷 1장 이상
-- [ ] (포인트) 에이전트와 2회 이상 대화하며 개선한 흔적
+- [x] GitHub repo 링크 (Skill 코드 + JSON 포함)
+- [x] 생성된 레시피 md 1개 이상 (`recipes/spam-kimchi-fried-rice.md`)
+- [x] (포인트) 에이전트와 2회 이상 대화하며 개선한 흔적 (아래 캡처)
+- [ ] `/recipe` 실행 화면 스크린샷 (추가 예정)
 
-### 스크린샷 / 대화 캡처
+### 에이전트 대화 캡처
 
-<!-- 여기에 실행 화면, 에이전트 대화 캡처를 첨부 -->
+에이전트와 대화하며 썸네일을 Gemini → **Pollinations(무료, API 키 불필요)** 로 전환하고,
+반환 포맷(JPEG)에 맞춰 `SKILL.md`를 `.jpg`로 수정한 개선 과정.
+
+![에이전트 대화 캡처](./screenshot-agent-chat.png)
