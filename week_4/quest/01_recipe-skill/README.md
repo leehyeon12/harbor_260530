@@ -56,9 +56,16 @@ week_4/quest/01_recipe-skill/
 ## 제출물 (마감: 금요일 23:59)
 
 - [x] GitHub repo 링크 (Skill 코드 + JSON 포함)
-- [x] 생성된 레시피 md 1개 이상 (`recipes/spam-kimchi-fried-rice.md`)
-- [x] (포인트) 에이전트와 2회 이상 대화하며 개선한 흔적 (아래 캡처)
-- [ ] `/recipe` 실행 화면 스크린샷 (추가 예정)
+- [x] 생성된 레시피 md 2개 (`recipes/spam-kimchi-fried-rice.md`, `recipes/spam-kimchi-ramen.md`)
+- [x] `/recipe` 실행 화면 스크린샷 (아래)
+- [x] (포인트) 에이전트와 2회 이상 대화하며 개선한 흔적 (아래)
+
+### `/recipe` 실행 화면
+
+`/recipe` 입력 → `ingredients/`의 JSON을 모두 읽고 → 2인분 레시피를 구성해
+`recipes/`에 마크다운으로 저장하는 실행 흐름.
+
+![recipe 스킬 실행 화면](./screenshot-run.png)
 
 ### 에이전트 대화 캡처
 
