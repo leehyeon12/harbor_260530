@@ -17,6 +17,6 @@
 # 강의 외 사이드 프로젝트 (각자 독립 git 저장소)
 side/
 
-# 개인 세팅 참조 노트 + 로컬 전용 지침 (공개 repo에 올리지 않음, 로컬 보관)
+# 개인 세팅 참조 노트 + 프로젝트 지침 (공개 repo에 올리지 않음, 로컬 보관)
 docs/supabase-vercel-setup.md
-CLAUDE.local.md
+CLAUDE.md
