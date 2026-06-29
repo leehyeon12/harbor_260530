@@ -13,3 +13,6 @@
 
 # Claude Code 런타임 임시 파일 (세션/PID 정보)
 .claude/scheduled_tasks.lock
+
+# 강의 외 사이드 프로젝트 (각자 독립 git 저장소)
+side/
