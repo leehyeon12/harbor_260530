@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>중고테크 마켓</title>
+
+  <!-- Tailwind CSS (버전 고정) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+
+  <!--
+    ⚠️ 모든 CDN은 버전을 명시적으로 고정한다.
+    미고정 시 @babel/standalone 이 최신(8.x)으로 올라가 type="text/babel"
+    인라인 변환이 통째로 깨진다. Babel 은 반드시 7.x 로 고정.
+  -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+
+  <style>
+    /* 토스트 등장 애니메이션 (Tailwind 유틸로 표현하기 어려운 keyframe) */
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-toast-in { animation: toast-in 0.25s ease-out; }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-slate-100 to-slate-200 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 추출
+    // ========================================
+    const { useState, useEffect, useMemo, useCallback } = React
+
+    // 같은 출처(same-origin)로 서빙되므로 상대경로 사용 (localhost 하드코딩 금지)
+    const API_BASE_URL = '/api'
+    // JWT 토큰 / 사용자 정보를 저장할 localStorage 키
+    const TOKEN_KEY = 'shop_token'
+    const USER_KEY = 'shop_user'
+
+    // ========================================
+    // 상수 / 유틸
+    // ========================================
+
+    // 금액을 원화 포맷으로: 120000 → "120,000원"
+    const formatWon = (value) => {
+      const n = Number(value) || 0
+      return `${n.toLocaleString('ko-KR')}원`
+    }
+
+    // 이미지 로드 실패 시 대체할 플레이스홀더 (data URI — 외부 요청 없음)
+    const FALLBACK_IMG =
+      'data:image/svg+xml;utf8,' +
+      encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">' +
+        '<rect width="100%" height="100%" fill="#e2e8f0"/>' +
+        '<text x="50%" y="50%" font-size="20" fill="#94a3b8" text-anchor="middle" ' +
+        'dominant-baseline="middle" font-family="sans-serif">이미지 없음</text></svg>'
+      )
+
+    // ========================================
+    // 🔐 인증 저장소 헬퍼 (localStorage) — todo-app 정본 계승
+    // ========================================
+    const authStore = {
+      getToken: () => localStorage.getItem(TOKEN_KEY),
+      getUser: () => {
+        try {
+          return JSON.parse(localStorage.getItem(USER_KEY) || 'null')
+        } catch {
+          return null
+        }
+      },
+      save: (token, user) => {
+        localStorage.setItem(TOKEN_KEY, token)
+        localStorage.setItem(USER_KEY, JSON.stringify(user))
+      },
+      clear: () => {
+        localStorage.removeItem(TOKEN_KEY)
+        localStorage.removeItem(USER_KEY)
+      },
+    }
+
+    // ========================================
+    // 🌐 인증 헤더를 자동으로 붙이는 fetch 래퍼 — todo-app 정본 계승
+    // ========================================
+    // 401 응답이 오면 onUnauthorized 콜백(자동 로그아웃)을 호출한다.
+    function createApiFetch(onUnauthorized) {
+      return async (url, options = {}) => {
+        const token = authStore.getToken()
+        const headers = { ...(options.headers || {}) }
+        if (token) headers['Authorization'] = `Bearer ${token}`
+
+        const res = await fetch(url, { ...options, headers })
+        if (res.status === 401) {
+          onUnauthorized()
+          throw new Error('로그인이 만료되었어요. 다시 로그인해 주세요.')
+        }
+        return res
+      }
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트 (순수 프레젠테이션)
+    // ========================================
+
+    // 카드 래퍼: 그림자 + 둥근 모서리
+    function Card({ children, className = '' }) {
+      return (
+        <div className={`bg-white rounded-2xl shadow-xl ${className}`}>
+          {children}
+        </div>
+      )
+    }
+
+    // 배지: 개수/카테고리 표시 등에 사용
+    function Badge({ children, className = '' }) {
+      return (
+        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${className}`}>
+          {children}
+        </span>
+      )
+    }
+
+    // 스피너: 로딩 인디케이터
+    function Spinner() {
+      return (
+        <div
+          className="w-8 h-8 border-4 border-slate-200 border-t-indigo-500 rounded-full animate-spin"
+          role="status"
+          aria-label="로딩 중"
+        />
+      )
+    }
+
+    // 입력창: 단일 라인 (controlled). type 지정 가능(password 등)
+    function Input({ value, onChange, onKeyDown, placeholder, disabled, type = 'text', className = '' }) {
+      return (
+        <input
+          type={type}
+          value={value}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          disabled={disabled}
+          className={`min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700
+            placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300
+            focus:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        />
+      )
+    }
+
+    // 버튼: variant·disabled 지원하는 작은 프리미티브
+    function Button({ children, onClick, disabled, type = 'button', className = '' }) {
+      return (
+        <button
+          type={type}
+          onClick={onClick}
+          disabled={disabled}
+          className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors
+            disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // 모달: isOpen / onClose / title / children — 배경 클릭·ESC 로 닫힘
+    function Modal({ isOpen, onClose, title, children }) {
+      // ESC 키로 닫기
+      useEffect(() => {
+        if (!isOpen) return
+        const onKey = (e) => { if (e.key === 'Escape') onClose() }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [isOpen, onClose])
+
+      if (!isOpen) return null
+
+      return (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-slate-900/50 backdrop-blur-sm"
+          onClick={onClose}
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+        >
+          {/* 내부 클릭은 닫힘 방지 */}
+          <div className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            {children}
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 상태별 표시 컴포넌트
+    // ========================================
+
+    // 로딩 상태
+    function LoadingState({ label = '불러오는 중...' }) {
+      return (
+        <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500">
+          <Spinner />
+          <p className="text-sm">{label}</p>
+        </div>
+      )
+    }
+
+    // 에러 상태
+    function ErrorState({ message, onRetry }) {
+      return (
+        <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
+          <div className="text-4xl">⚠️</div>
+          <p className="text-red-600 font-medium">불러오기에 실패했어요</p>
+          <p className="text-sm text-slate-500 max-w-xs break-words">{message}</p>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="mt-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-sm font-semibold transition-colors"
+            >
+              다시 시도
+            </button>
+          )}
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🍞 토스트 (담기 성공 등 피드백)
+    // ========================================
+    function Toast({ message }) {
+      if (!message) return null
+      return (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] animate-toast-in">
+          <div className="px-5 py-3 rounded-xl bg-slate-800 text-white text-sm font-medium shadow-2xl flex items-center gap-2">
+            <span>✅</span>
+            <span className="break-words">{message}</span>
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🔑 로그인 / 회원가입 폼 (모달 안에서 사용) — todo-app AuthForm 계승
+    // ========================================
+    // onAuthSuccess: 성공 시 user 전달 / onClose: 모달 닫기(없으면 닫기 버튼 숨김)
+    function AuthForm({ onAuthSuccess, onClose }) {
+      const [mode, setMode] = useState('login') // 'login' | 'register'
+      const [username, setUsername] = useState('')
+      const [password, setPassword] = useState('')
+      const [submitting, setSubmitting] = useState(false)
+      const [error, setError] = useState(null)
+
+      const isLogin = mode === 'login'
+
+      // 로그인/회원가입 요청 (auth 엔드포인트는 토큰이 없으므로 순수 fetch 사용)
+      const handleSubmit = () => {
+        const id = username.trim()
+        if (!id || !password || submitting) return
+
+        setSubmitting(true)
+        setError(null)
+
+        const endpoint = isLogin ? '/auth/login' : '/auth/register'
+        fetch(`${API_BASE_URL}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: id, password }),
+        })
+          .then(async (res) => {
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.error || `요청 실패 (${res.status})`)
+            return data
+          })
+          .then((data) => {
+            // 토큰 저장 후 상위로 알림
+            authStore.save(data.token, data.user)
+            onAuthSuccess(data.user)
+          })
+          .catch((err) => {
+            setError(err.message || '오류가 발생했어요')
+          })
+          .finally(() => {
+            setSubmitting(false)
+          })
+      }
+
+      const handleKeyDown = (e) => {
+        if (e.key === 'Enter') handleSubmit()
+      }
+
+      // 모드 전환 시 에러 초기화
+      const switchMode = (next) => {
+        setMode(next)
+        setError(null)
+      }
+
+      return (
+        <Card className="overflow-hidden">
+          {/* 헤더 */}
+          <header className="relative px-6 py-6 bg-gradient-to-r from-indigo-500 to-violet-500 text-white">
+            <h2 className="text-xl font-bold tracking-tight">🛒 중고테크 마켓</h2>
+            <p className="text-indigo-100 text-sm mt-1">
+              {isLogin ? '로그인하고 장바구니에 담아보세요' : '회원가입하고 시작하세요'}
+            </p>
+            {onClose && (
+              <button
+                onClick={onClose}
+                aria-label="닫기"
+                className="absolute top-4 right-4 w-8 h-8 rounded-lg flex items-center justify-center
+                  text-white/80 hover:text-white hover:bg-white/20 transition-colors font-bold"
+              >
+                ✕
+              </button>
+            )}
+          </header>
+
+          {/* 로그인/회원가입 탭 */}
+          <div className="flex border-b border-slate-100">
+            <button
+              onClick={() => switchMode('login')}
+              className={`flex-1 py-3 text-sm font-semibold transition-colors
+                ${isLogin ? 'text-indigo-600 border-b-2 border-indigo-500' : 'text-slate-400 hover:text-slate-600'}`}
+            >
+              로그인
+            </button>
+            <button
+              onClick={() => switchMode('register')}
+              className={`flex-1 py-3 text-sm font-semibold transition-colors
+                ${!isLogin ? 'text-indigo-600 border-b-2 border-indigo-500' : 'text-slate-400 hover:text-slate-600'}`}
+            >
+              회원가입
+            </button>
+          </div>
+
+          {/* 입력 폼 */}
+          <div className="px-6 py-6 flex flex-col gap-3">
+            <Input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="아이디"
+              disabled={submitting}
+              className="w-full"
+            />
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="비밀번호"
+              disabled={submitting}
+              className="w-full"
+            />
+
+            {/* 에러 배너 */}
+            {error && (
+              <div
+                role="alert"
+                className="flex items-center gap-2 px-3 py-2 rounded-lg
+                  bg-red-50 text-red-700 text-sm border border-red-100"
+              >
+                <span className="break-words">⚠️ {error}</span>
+              </div>
+            )}
+
+            <Button
+              onClick={handleSubmit}
+              disabled={submitting || username.trim() === '' || password === ''}
+              className="bg-indigo-500 hover:bg-indigo-600 text-white mt-1"
+            >
+              {submitting ? '처리 중…' : isLogin ? '로그인' : '회원가입'}
+            </Button>
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🧩 상품 카드
+    // ========================================
+    function ProductCard({ product, onAddToCart, busy }) {
+      return (
+        <Card className="overflow-hidden flex flex-col hover:shadow-2xl transition-shadow">
+          {/* 이미지 */}
+          <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
+            <img
+              src={product.image_url || FALLBACK_IMG}
+              alt={product.name}
+              loading="lazy"
+              onError={(e) => { e.currentTarget.src = FALLBACK_IMG }}
+              className="w-full h-full object-cover"
+            />
+          </div>
+
+          {/* 정보 */}
+          <div className="flex flex-col flex-1 px-4 py-4">
+            <h3 className="text-sm font-bold text-slate-800 break-words line-clamp-2">
+              {product.name}
+            </h3>
+            {product.description && (
+              <p className="mt-1.5 text-xs text-slate-500 break-words line-clamp-2">
+                {product.description}
+              </p>
+            )}
+            <p className="mt-3 text-lg font-bold text-indigo-600">
+              {formatWon(product.price)}
+            </p>
+
+            <Button
+              onClick={() => onAddToCart(product)}
+              disabled={busy}
+              className="mt-3 w-full bg-indigo-500 hover:bg-indigo-600 text-white"
+            >
+              {busy ? '담는 중…' : '🛒 장바구니 담기'}
+            </Button>
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
+    // 🧩 장바구니 항목
+    // ========================================
+    // item: { cart_id, product_id, name, price, image_url, quantity, subtotal }
+    function CartItem({ item, onChangeQty, onRemove, busy }) {
+      return (
+        <li className="flex items-center gap-3 py-4 border-b border-slate-100 last:border-b-0">
+          {/* 썸네일 */}
+          <div className="w-16 h-16 shrink-0 rounded-xl bg-slate-100 overflow-hidden">
+            <img
+              src={item.image_url || FALLBACK_IMG}
+              alt={item.name}
+              onError={(e) => { e.currentTarget.src = FALLBACK_IMG }}
+              className="w-full h-full object-cover"
+            />
+          </div>
+
+          {/* 이름 / 단가 */}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-slate-800 break-words line-clamp-1">
+              {item.name}
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              단가 {formatWon(item.price)}
+            </p>
+            {/* 수량 조절 */}
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                onClick={() => onChangeQty(item, item.quantity - 1)}
+                disabled={busy}
+                aria-label="수량 줄이기"
+                className="w-7 h-7 rounded-lg border border-slate-200 text-slate-600 font-bold
+                  hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                −
+              </button>
+              <span className="min-w-[2rem] text-center text-sm font-semibold text-slate-700">
+                {item.quantity}
+              </span>
+              <button
+                onClick={() => onChangeQty(item, item.quantity + 1)}
+                disabled={busy}
+                aria-label="수량 늘리기"
+                className="w-7 h-7 rounded-lg border border-slate-200 text-slate-600 font-bold
+                  hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          {/* 소계 / 삭제 */}
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <span className="text-sm font-bold text-slate-800 whitespace-nowrap">
+              {formatWon(item.subtotal)}
+            </span>
+            <button
+              onClick={() => onRemove(item)}
+              disabled={busy}
+              aria-label={`${item.name} 삭제`}
+              className="px-2 py-1 rounded-lg text-xs font-medium text-slate-400
+                hover:text-red-600 hover:bg-red-50 transition-colors
+                disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              삭제
+            </button>
+          </div>
+        </li>
+      )
+    }
+
+    // ========================================
+    // 📄 장바구니 뷰 (로그인 필요)
+    // ========================================
+    function CartView({ apiFetch, onBack, onCartChange }) {
+      const [items, setItems] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)
+      const [actionError, setActionError] = useState(null)
+      const [busyIds, setBusyIds] = useState(new Set())
+
+      const setBusy = (id, on) => {
+        setBusyIds((prev) => {
+          const next = new Set(prev)
+          if (on) next.add(id)
+          else next.delete(id)
+          return next
+        })
+      }
+
+      // GET /api/cart
+      const loadCart = useCallback(() => {
+        setLoading(true)
+        setError(null)
+
+        apiFetch(`${API_BASE_URL}/cart`)
+          .then((res) => {
+            if (!res.ok) throw new Error(`서버 응답 오류 (${res.status})`)
+            return res.json()
+          })
+          .then((data) => {
+            const list = Array.isArray(data) ? data : []
+            setItems(list)
+            // 헤더 배지 동기화 (총 수량)
+            onCartChange(list.reduce((sum, it) => sum + Number(it.quantity), 0))
+          })
+          .catch((err) => {
+            setError(err.message || '알 수 없는 오류')
+          })
+          .finally(() => {
+            setLoading(false)
+          })
+      }, [apiFetch, onCartChange])
+
+      useEffect(() => {
+        loadCart()
+      }, [loadCart])
+
+      // 수량 변경: PATCH /api/cart/:id { quantity } — 낙관적 업데이트 후 실패 시 롤백
+      // 서버 규칙: quantity 0 이하면 삭제되므로, 그 경우 목록에서 제거
+      const handleChangeQty = (item, nextQty) => {
+        if (busyIds.has(item.cart_id)) return
+
+        setActionError(null)
+        setBusy(item.cart_id, true)
+
+        const willRemove = nextQty <= 0
+        const prevItems = items
+
+        // 1) 화면 먼저 갱신 (낙관적)
+        setItems((prev) => {
+          if (willRemove) return prev.filter((it) => it.cart_id !== item.cart_id)
+          return prev.map((it) =>
+            it.cart_id === item.cart_id
+              ? { ...it, quantity: nextQty, subtotal: Number(it.price) * nextQty }
+              : it
+          )
+        })
+
+        apiFetch(`${API_BASE_URL}/cart/${item.cart_id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ quantity: nextQty }),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`수량 변경 실패 (${res.status})`)
+            // 서버 확정값 반영을 위해 목록 재조회 (subtotal 등 서버 계산 기준)
+            loadCart()
+          })
+          .catch((err) => {
+            // 2) 실패 시 롤백
+            setItems(prevItems)
+            onCartChange(prevItems.reduce((sum, it) => sum + Number(it.quantity), 0))
+            setActionError(err.message || '수량 변경 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusy(item.cart_id, false)
+          })
+      }
+
+      // 삭제: DELETE /api/cart/:id — 낙관적 제거 후 실패 시 롤백
+      const handleRemove = (item) => {
+        if (busyIds.has(item.cart_id)) return
+
+        setActionError(null)
+        setBusy(item.cart_id, true)
+        const prevItems = items
+
+        setItems((prev) => prev.filter((it) => it.cart_id !== item.cart_id))
+        onCartChange(
+          prevItems
+            .filter((it) => it.cart_id !== item.cart_id)
+            .reduce((sum, it) => sum + Number(it.quantity), 0)
+        )
+
+        apiFetch(`${API_BASE_URL}/cart/${item.cart_id}`, { method: 'DELETE' })
+          .then((res) => {
+            if (!res.ok) throw new Error(`삭제 실패 (${res.status})`)
+          })
+          .catch((err) => {
+            setItems(prevItems)
+            onCartChange(prevItems.reduce((sum, it) => sum + Number(it.quantity), 0))
+            setActionError(err.message || '삭제 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusy(item.cart_id, false)
+          })
+      }
+
+      // 총 합계 (서버 subtotal 합)
+      const total = useMemo(
+        () => items.reduce((sum, it) => sum + Number(it.subtotal || 0), 0),
+        [items]
+      )
+      const count = items.length
+
+      return (
+        <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
+          {/* 상단 바 */}
+          <div className="flex items-center gap-3 mb-5">
+            <button
+              onClick={onBack}
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold text-slate-600
+                bg-white shadow hover:bg-slate-50 transition-colors"
+            >
+              ← 계속 쇼핑하기
+            </button>
+            <h1 className="text-xl font-bold tracking-tight text-slate-800">장바구니</h1>
+          </div>
+
+          <Card>
+            <div className="px-6 py-5">
+              {/* 액션 에러 배너 */}
+              {actionError && (
+                <div
+                  role="alert"
+                  className="mb-4 flex items-center justify-between gap-3 px-3 py-2 rounded-lg
+                    bg-red-50 text-red-700 text-sm border border-red-100"
+                >
+                  <span className="break-words">⚠️ {actionError}</span>
+                  <button
+                    onClick={() => setActionError(null)}
+                    aria-label="에러 닫기"
+                    className="shrink-0 text-red-400 hover:text-red-600 font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {loading && <LoadingState label="장바구니를 불러오는 중..." />}
+
+              {!loading && error && (
+                <ErrorState message={error} onRetry={loadCart} />
+              )}
+
+              {!loading && !error && count === 0 && (
+                <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
+                  <div className="text-4xl">🛒</div>
+                  <p className="text-sm">장바구니가 비어 있어요</p>
+                  <button
+                    onClick={onBack}
+                    className="mt-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-sm font-semibold transition-colors"
+                  >
+                    상품 보러 가기
+                  </button>
+                </div>
+              )}
+
+              {!loading && !error && count > 0 && (
+                <>
+                  <ul className="flex flex-col">
+                    {items.map((item) => (
+                      <CartItem
+                        key={item.cart_id}
+                        item={item}
+                        onChangeQty={handleChangeQty}
+                        onRemove={handleRemove}
+                        busy={busyIds.has(item.cart_id)}
+                      />
+                    ))}
+                  </ul>
+
+                  {/* 총 합계 */}
+                  <div className="mt-5 pt-5 border-t border-slate-200 flex items-center justify-between">
+                    <span className="text-sm font-medium text-slate-500">
+                      총 {count}종 상품
+                    </span>
+                    <div className="text-right">
+                      <span className="text-xs text-slate-400 mr-2">합계</span>
+                      <span className="text-2xl font-bold text-indigo-600">
+                        {formatWon(total)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <Button
+                    disabled
+                    className="mt-4 w-full bg-slate-800 text-white opacity-90 cursor-default"
+                  >
+                    주문하기 (데모)
+                  </Button>
+                </>
+              )}
+            </div>
+          </Card>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 📄 상품 목록 뷰 (공개 — 비로그인도 열람)
+    // ========================================
+    function ProductListView({ user, apiFetch, onRequireLogin, onAddedToCart }) {
+      const [products, setProducts] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)
+      const [busyId, setBusyId] = useState(null) // 담기 진행 중인 product_id
+
+      // GET /api/products (공개)
+      const loadProducts = useCallback(() => {
+        setLoading(true)
+        setError(null)
+
+        fetch(`${API_BASE_URL}/products`)
+          .then((res) => {
+            if (!res.ok) throw new Error(`서버 응답 오류 (${res.status})`)
+            return res.json()
+          })
+          .then((data) => {
+            setProducts(Array.isArray(data) ? data : [])
+          })
+          .catch((err) => {
+            setError(err.message || '알 수 없는 오류')
+          })
+          .finally(() => {
+            setLoading(false)
+          })
+      }, [])
+
+      useEffect(() => {
+        loadProducts()
+      }, [loadProducts])
+
+      // 장바구니 담기: 비로그인이면 로그인 모달을 띄운다 (이 퀘스트 핵심)
+      const handleAddToCart = (product) => {
+        if (!user) {
+          onRequireLogin()
+          return
+        }
+        if (busyId) return
+
+        setBusyId(product.id)
+
+        apiFetch(`${API_BASE_URL}/cart`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: product.id, quantity: 1 }),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`담기 실패 (${res.status})`)
+            return res.json().catch(() => ({}))
+          })
+          .then(() => {
+            // 담기 성공 → 토스트 + 헤더 배지 갱신 (상위에서 장바구니 재조회)
+            onAddedToCart(product)
+          })
+          .catch((err) => {
+            onAddedToCart(null, err.message || '담기 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusyId(null)
+          })
+      }
+
+      return (
+        <main className="max-w-5xl mx-auto px-4 py-8 sm:py-10">
+          {/* 소개 배너 */}
+          <div className="mb-6">
+            <h1 className="text-2xl font-bold tracking-tight text-slate-800">
+              중고 전자기기, 합리적인 가격에
+            </h1>
+            <p className="text-slate-500 text-sm mt-1">
+              검수 완료된 중고 테크 제품을 만나보세요
+              {!user && ' · 장바구니 담기는 로그인 후 이용 가능합니다'}
+            </p>
+          </div>
+
+          {loading && <LoadingState label="상품을 불러오는 중..." />}
+
+          {!loading && error && (
+            <ErrorState message={error} onRetry={loadProducts} />
+          )}
+
+          {!loading && !error && products.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-20 gap-3 text-slate-400">
+              <div className="text-4xl">📦</div>
+              <p className="text-sm">등록된 상품이 없어요</p>
+            </div>
+          )}
+
+          {!loading && !error && products.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+              {products.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  onAddToCart={handleAddToCart}
+                  busy={busyId === product.id}
+                />
+              ))}
+            </div>
+          )}
+        </main>
+      )
+    }
+
+    // ========================================
+    // 🧩 헤더 (마켓 이름 + 로그인 상태 + 장바구니)
+    // ========================================
+    function Header({ user, cartCount, onOpenCart, onOpenLogin, onLogout, onGoHome }) {
+      return (
+        <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm">
+          <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between gap-3">
+            {/* 마켓 이름 */}
+            <button
+              onClick={onGoHome}
+              className="flex items-center gap-2 text-lg font-bold tracking-tight text-slate-800 hover:text-indigo-600 transition-colors"
+            >
+              <span>🛒</span>
+              <span>중고테크 마켓</span>
+            </button>
+
+            {/* 우측 상태 */}
+            <div className="flex items-center gap-2">
+              {user ? (
+                <>
+                  <span className="hidden sm:inline text-sm text-slate-500">
+                    <span className="font-semibold text-slate-700">{user.username}</span>님
+                  </span>
+
+                  {/* 장바구니 아이콘 + 개수 배지 */}
+                  <button
+                    onClick={onOpenCart}
+                    aria-label="장바구니 열기"
+                    className="relative px-3 py-2 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors"
+                  >
+                    <span className="text-xl">🛒</span>
+                    {cartCount > 0 && (
+                      <span className="absolute -top-0.5 -right-0.5 min-w-[1.25rem] h-5 px-1
+                        flex items-center justify-center rounded-full bg-indigo-500 text-white text-[11px] font-bold">
+                        {cartCount > 99 ? '99+' : cartCount}
+                      </span>
+                    )}
+                  </button>
+
+                  <Button
+                    onClick={onLogout}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2"
+                  >
+                    로그아웃
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  onClick={onOpenLogin}
+                  className="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2"
+                >
+                  로그인
+                </Button>
+              )}
+            </div>
+          </div>
+        </header>
+      )
+    }
+
+    // ========================================
+    // 🚀 App: 전체 상태 조율 (뷰 전환 / 인증 / 장바구니 개수)
+    // ========================================
+    function App() {
+      // 새로고침해도 유지되도록 localStorage 에서 초기값 로드
+      const [user, setUser] = useState(() => authStore.getUser())
+      const [view, setView] = useState('products') // 'products' | 'cart'
+      const [authOpen, setAuthOpen] = useState(false) // 로그인 모달 표시 여부
+      const [cartCount, setCartCount] = useState(0)   // 헤더 배지용 총 수량
+      const [toast, setToast] = useState(null)        // 담기 피드백 토스트
+
+      // 로그아웃: 토큰 제거 + 상태 초기화 + 상품 화면으로 복귀
+      const handleLogout = useCallback(() => {
+        authStore.clear()
+        setUser(null)
+        setCartCount(0)
+        setView('products')
+      }, [])
+
+      // 인증 실패(401) 시 자동 로그아웃되는 fetch 래퍼 (user 변동과 무관하게 고정)
+      const apiFetch = useMemo(() => createApiFetch(handleLogout), [handleLogout])
+
+      // 토큰 유무로 실제 로그인 판단 (user 정보만 있고 토큰 없는 경우 방지)
+      const hasToken = !!authStore.getToken()
+      const isLoggedIn = !!user && hasToken
+
+      // 토스트 자동 사라짐
+      useEffect(() => {
+        if (!toast) return
+        const t = setTimeout(() => setToast(null), 2200)
+        return () => clearTimeout(t)
+      }, [toast])
+
+      // 로그인한 상태에서 장바구니 개수를 한 번 동기화 (새로고침 시 배지 복원)
+      useEffect(() => {
+        if (!isLoggedIn) return
+        apiFetch(`${API_BASE_URL}/cart`)
+          .then((res) => (res.ok ? res.json() : []))
+          .then((data) => {
+            const list = Array.isArray(data) ? data : []
+            setCartCount(list.reduce((sum, it) => sum + Number(it.quantity), 0))
+          })
+          .catch(() => { /* 배지 동기화 실패는 조용히 무시 */ })
+      }, [isLoggedIn, apiFetch])
+
+      // 로그인 성공: 모달 닫고 user 반영
+      const handleAuthSuccess = (u) => {
+        setUser(u)
+        setAuthOpen(false)
+      }
+
+      // 상품 카드에서 담기 완료(or 실패) 콜백
+      // product 있으면 성공 → 토스트 + 장바구니 개수 재조회 / 실패면 에러 토스트
+      const handleAddedToCart = (product, errMessage) => {
+        if (!product) {
+          setToast(errMessage ? `⚠️ ${errMessage}` : '담기에 실패했어요')
+          return
+        }
+        setToast(`"${product.name}" 장바구니에 담았어요`)
+        // 서버 기준 개수 재조회 (수량 누적 반영)
+        apiFetch(`${API_BASE_URL}/cart`)
+          .then((res) => (res.ok ? res.json() : []))
+          .then((data) => {
+            const list = Array.isArray(data) ? data : []
+            setCartCount(list.reduce((sum, it) => sum + Number(it.quantity), 0))
+          })
+          .catch(() => {})
+      }
+
+      return (
+        <div className="min-h-screen">
+          <Header
+            user={isLoggedIn ? user : null}
+            cartCount={cartCount}
+            onOpenCart={() => setView('cart')}
+            onOpenLogin={() => setAuthOpen(true)}
+            onLogout={handleLogout}
+            onGoHome={() => setView('products')}
+          />
+
+          {/* 본문: 로그인 상태 + 현재 뷰에 따라 분기 */}
+          {view === 'cart' && isLoggedIn ? (
+            <CartView
+              apiFetch={apiFetch}
+              onBack={() => setView('products')}
+              onCartChange={setCartCount}
+            />
+          ) : (
+            <ProductListView
+              user={isLoggedIn ? user : null}
+              apiFetch={apiFetch}
+              onRequireLogin={() => setAuthOpen(true)}
+              onAddedToCart={handleAddedToCart}
+            />
+          )}
+
+          {/* 로그인/회원가입 모달 */}
+          <Modal isOpen={authOpen} onClose={() => setAuthOpen(false)} title="로그인">
+            <AuthForm onAuthSuccess={handleAuthSuccess} onClose={() => setAuthOpen(false)} />
+          </Modal>
+
+          {/* 담기 피드백 토스트 */}
+          <Toast message={toast} />
+
+          {/* 푸터 */}
+          <footer className="max-w-5xl mx-auto px-4 py-8">
+            <p className="text-center text-xs text-slate-400">
+              장바구니 담기는 로그인 후 이용 가능하며, 토큰(JWT)은 브라우저에 안전하게 저장됩니다.
+            </p>
+          </footer>
+        </div>
+      )
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>
