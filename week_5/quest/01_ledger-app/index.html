@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>우리집 가계부</title>
+
+  <!-- Tailwind CSS (버전 고정) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+
+  <!--
+    ⚠️ 모든 CDN은 버전을 명시적으로 고정한다.
+    미고정 시 @babel/standalone 이 최신(8.x)으로 올라가 type="text/babel"
+    인라인 변환이 통째로 깨진다. Babel 은 반드시 7.x 로 고정.
+  -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+</head>
+<body class="bg-gradient-to-br from-slate-100 to-slate-200 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React Hooks 추출
+    // ========================================
+    const { useState, useEffect, useMemo } = React
+
+    // 같은 출처(same-origin)로 서빙되므로 상대경로 사용 (localhost 하드코딩 금지)
+    const API_BASE_URL = '/api'
+
+    // ========================================
+    // 상수 / 유틸
+    // ========================================
+
+    // 지출/수입별 카테고리 목록 (select 옵션)
+    const CATEGORIES = {
+      expense: ['식비', '교통', '주거', '구독료', '경조사', '생활', '기타'],
+      income: ['월급', '용돈', '부수입', '기타'],
+    }
+
+    // 오늘 날짜를 YYYY-MM-DD 로 (date input 기본값)
+    const todayStr = () => {
+      const d = new Date()
+      const yyyy = d.getFullYear()
+      const mm = String(d.getMonth() + 1).padStart(2, '0')
+      const dd = String(d.getDate()).padStart(2, '0')
+      return `${yyyy}-${mm}-${dd}`
+    }
+
+    // 금액을 원화 포맷으로: 12000 → "12,000원"
+    const formatWon = (value) => {
+      const n = Number(value) || 0
+      return `${n.toLocaleString('ko-KR')}원`
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트 (순수 프레젠테이션)
+    // ========================================
+
+    // 카드 래퍼: 그림자 + 둥근 모서리
+    function Card({ children, className = '' }) {
+      return (
+        <div className={`bg-white rounded-2xl shadow-xl ${className}`}>
+          {children}
+        </div>
+      )
+    }
+
+    // 배지: 카테고리 합계 등에 사용
+    function Badge({ children, className = '' }) {
+      return (
+        <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold ${className}`}>
+          {children}
+        </span>
+      )
+    }
+
+    // 스피너: 로딩 인디케이터
+    function Spinner() {
+      return (
+        <div
+          className="w-8 h-8 border-4 border-slate-200 border-t-indigo-500 rounded-full animate-spin"
+          role="status"
+          aria-label="로딩 중"
+        />
+      )
+    }
+
+    // 입력창: 단일 라인 (controlled). type 지정 가능(number/date 등)
+    function Input({ type = 'text', value, onChange, placeholder, disabled, min, className = '' }) {
+      return (
+        <input
+          type={type}
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          disabled={disabled}
+          min={min}
+          className={`min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700
+            placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300
+            focus:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        />
+      )
+    }
+
+    // 셀렉트: 카테고리 선택 (controlled)
+    function Select({ value, onChange, disabled, options, className = '' }) {
+      return (
+        <select
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          className={`min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 bg-white
+            focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300 transition
+            disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        >
+          {options.map((opt) => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+        </select>
+      )
+    }
+
+    // 버튼: variant·disabled 지원하는 작은 프리미티브
+    function Button({ children, onClick, disabled, type = 'button', className = '' }) {
+      return (
+        <button
+          type={type}
+          onClick={onClick}
+          disabled={disabled}
+          className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors
+            disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // ========================================
+    // 🧩 상태별 표시 컴포넌트
+    // ========================================
+
+    // 로딩 상태
+    function LoadingState() {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-slate-500">
+          <Spinner />
+          <p className="text-sm">내역을 불러오는 중...</p>
+        </div>
+      )
+    }
+
+    // 에러 상태
+    function ErrorState({ message, onRetry }) {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
+          <div className="text-4xl">⚠️</div>
+          <p className="text-red-600 font-medium">불러오기에 실패했어요</p>
+          <p className="text-sm text-slate-500 max-w-xs break-words">{message}</p>
+          <button
+            onClick={onRetry}
+            className="mt-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-sm font-semibold transition-colors"
+          >
+            다시 시도
+          </button>
+        </div>
+      )
+    }
+
+    // 항목 없음 상태
+    function EmptyState() {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-400">
+          <div className="text-4xl">🧾</div>
+          <p className="text-sm">아직 등록된 내역이 없어요</p>
+          <p className="text-xs">위 폼에서 첫 수입/지출을 기록해보세요</p>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 요약 카드 (총수입 / 총지출 / 잔액)
+    // ========================================
+    function SummaryCard({ label, amount, tone }) {
+      // tone: income(초록) / expense(빨강) / balance(잔액-부호에 따라 색)
+      let accent = 'text-slate-800'
+      if (tone === 'income') accent = 'text-emerald-600'
+      else if (tone === 'expense') accent = 'text-red-600'
+      else if (tone === 'balance') accent = amount < 0 ? 'text-red-600' : 'text-indigo-600'
+
+      return (
+        <div className="flex-1 min-w-0 bg-white rounded-2xl shadow-md px-4 py-4 text-center">
+          <p className="text-xs font-medium text-slate-400">{label}</p>
+          <p className={`mt-1 text-lg sm:text-xl font-bold break-words ${accent}`}>
+            {formatWon(amount)}
+          </p>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 카테고리별 합계 패널
+    // ========================================
+    // by_category = [{ type, category, total, cnt }, ...] 를 지출/수입으로 그룹핑
+    function CategoryPanel({ byCategory }) {
+      const expenses = byCategory.filter((c) => c.type === 'expense')
+      const incomes = byCategory.filter((c) => c.type === 'income')
+
+      const renderGroup = (title, items, badgeClass) => (
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-semibold text-slate-500 mb-2">{title}</p>
+          {items.length === 0 ? (
+            <p className="text-xs text-slate-300">내역 없음</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {items.map((c) => (
+                <Badge key={`${c.type}-${c.category}`} className={badgeClass}>
+                  <span>{c.category}</span>
+                  <span className="opacity-70">·</span>
+                  <span>{formatWon(c.total)}</span>
+                  <span className="opacity-60 text-xs">({c.cnt})</span>
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+
+      return (
+        <div className="flex flex-col sm:flex-row gap-4">
+          {renderGroup('지출 카테고리', expenses, 'bg-red-50 text-red-600')}
+          {renderGroup('수입 카테고리', incomes, 'bg-emerald-50 text-emerald-600')}
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 내역 항목 (보기 ↔ 인라인 편집 토글)
+    // ========================================
+    function TransactionItem({ tx, onSave, onDelete, busy }) {
+      const [editing, setEditing] = useState(false)
+      const [type, setType] = useState(tx.type)
+      const [category, setCategory] = useState(tx.category)
+      const [amount, setAmount] = useState(String(tx.amount))
+      const [memo, setMemo] = useState(tx.memo || '')
+      const [date, setDate] = useState(tx.date)
+
+      // 편집 시작: 현재 값으로 입력 필드 초기화
+      const startEdit = () => {
+        setType(tx.type)
+        setCategory(tx.category)
+        setAmount(String(tx.amount))
+        setMemo(tx.memo || '')
+        setDate(tx.date)
+        setEditing(true)
+      }
+
+      const cancelEdit = () => setEditing(false)
+
+      // 수입/지출 토글 시 해당 그룹 첫 카테고리로 자동 보정
+      const handleTypeChange = (nextType) => {
+        setType(nextType)
+        if (!CATEGORIES[nextType].includes(category)) {
+          setCategory(CATEGORIES[nextType][0])
+        }
+      }
+
+      // 저장: 부모에 PUT 위임, 성공 시 보기 모드로
+      const handleSave = () => {
+        const amt = Number(amount)
+        if (busy || !date || !category || !(amt > 0)) return
+        onSave(
+          tx,
+          { type, category, amount: amt, memo, date },
+          () => setEditing(false)
+        )
+      }
+
+      // ----- 편집 모드 -----
+      if (editing) {
+        return (
+          <li className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-4">
+            {/* 수입/지출 토글 */}
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <Button
+                onClick={() => handleTypeChange('expense')}
+                disabled={busy}
+                className={type === 'expense'
+                  ? 'bg-red-500 text-white'
+                  : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}
+              >
+                지출
+              </Button>
+              <Button
+                onClick={() => handleTypeChange('income')}
+                disabled={busy}
+                className={type === 'income'
+                  ? 'bg-emerald-500 text-white'
+                  : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}
+              >
+                수입
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <Input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                disabled={busy}
+                className="w-full"
+              />
+              <Input
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="금액"
+                min="0"
+                disabled={busy}
+                className="w-full"
+              />
+              <Select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                disabled={busy}
+                options={CATEGORIES[type]}
+                className="w-full"
+              />
+              <Input
+                value={memo}
+                onChange={(e) => setMemo(e.target.value)}
+                placeholder="메모(선택)"
+                disabled={busy}
+                className="w-full"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button
+                onClick={cancelEdit}
+                disabled={busy}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-600"
+              >
+                취소
+              </Button>
+              <Button
+                onClick={handleSave}
+                disabled={busy || !date || !(Number(amount) > 0)}
+                className="bg-indigo-500 hover:bg-indigo-600 text-white"
+              >
+                {busy ? '저장 중…' : '저장'}
+              </Button>
+            </div>
+          </li>
+        )
+      }
+
+      // ----- 보기 모드 -----
+      const isIncome = tx.type === 'income'
+      return (
+        <li className="group rounded-xl border border-slate-100 hover:border-slate-200 hover:bg-slate-50/60 transition-colors p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge className={isIncome ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}>
+                  {tx.category}
+                </Badge>
+                <span className="text-xs text-slate-400">{tx.date}</span>
+              </div>
+              {tx.memo && (
+                <p className="mt-1.5 text-sm text-slate-600 break-words whitespace-pre-wrap">
+                  {tx.memo}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <span className={`text-base font-bold whitespace-nowrap ${isIncome ? 'text-emerald-600' : 'text-red-600'}`}>
+                {isIncome ? '+' : '-'}{formatWon(tx.amount)}
+              </span>
+              <div className="flex gap-1 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                <button
+                  type="button"
+                  onClick={startEdit}
+                  disabled={busy}
+                  aria-label={`${tx.category} 내역 수정`}
+                  className="px-2 py-1.5 rounded-lg text-sm font-medium text-slate-400
+                    hover:text-indigo-600 hover:bg-indigo-50 transition-colors
+                    disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  수정
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDelete(tx)}
+                  disabled={busy}
+                  aria-label={`${tx.category} 내역 삭제`}
+                  className="px-2 py-1.5 rounded-lg text-sm font-medium text-slate-400
+                    hover:text-red-600 hover:bg-red-50 transition-colors
+                    disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  삭제
+                </button>
+              </div>
+            </div>
+          </div>
+        </li>
+      )
+    }
+
+    // ========================================
+    // 📄 페이지 컴포넌트 (비즈니스 로직)
+    // ========================================
+    function LedgerApp() {
+      const [transactions, setTransactions] = useState([]) // GET /api/transactions (date DESC)
+      const [stats, setStats] = useState(null)             // GET /api/stats
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)             // 최초/재조회 실패 (전체 화면 에러)
+      const [actionError, setActionError] = useState(null) // 추가/수정/삭제 액션 에러 (배너)
+
+      // 작성 폼 상태
+      const [type, setType] = useState('expense')          // 기본 '지출'
+      const [date, setDate] = useState(todayStr())         // 기본값 오늘
+      const [amount, setAmount] = useState('')
+      const [category, setCategory] = useState(CATEGORIES.expense[0])
+      const [memo, setMemo] = useState('')
+      const [adding, setAdding] = useState(false)
+
+      const [busyIds, setBusyIds] = useState(new Set())    // 수정/삭제 진행 중인 id 집합
+
+      // 특정 id 진행 상태 on/off
+      const setBusy = (id, on) => {
+        setBusyIds((prev) => {
+          const next = new Set(prev)
+          if (on) next.add(id)
+          else next.delete(id)
+          return next
+        })
+      }
+
+      // 목록 + 통계 동시 조회 (Promise.all)
+      const loadAll = () => {
+        setLoading(true)
+        setError(null)
+
+        Promise.all([
+          fetch(`${API_BASE_URL}/transactions`).then((res) => {
+            if (!res.ok) throw new Error(`내역 조회 오류 (${res.status})`)
+            return res.json()
+          }),
+          fetch(`${API_BASE_URL}/stats`).then((res) => {
+            if (!res.ok) throw new Error(`통계 조회 오류 (${res.status})`)
+            return res.json()
+          }),
+        ])
+          .then(([txData, statsData]) => {
+            setTransactions(Array.isArray(txData) ? txData : [])
+            setStats(statsData || null)
+          })
+          .catch((err) => {
+            setError(err.message || '알 수 없는 오류')
+          })
+          .finally(() => {
+            setLoading(false)
+          })
+      }
+
+      // 통계만 새로고침 (추가/수정/삭제 후 요약·카테고리 갱신용)
+      const refreshStats = () => {
+        fetch(`${API_BASE_URL}/stats`)
+          .then((res) => {
+            if (!res.ok) throw new Error(`통계 조회 오류 (${res.status})`)
+            return res.json()
+          })
+          .then((statsData) => setStats(statsData || null))
+          .catch(() => { /* 통계 갱신 실패는 조용히 무시 (목록은 정상) */ })
+      }
+
+      // 최초 마운트 시 1회 조회
+      useEffect(() => {
+        loadAll()
+      }, [])
+
+      // 폼에서 수입/지출 토글 시 카테고리를 해당 그룹 첫 값으로 보정
+      const handleFormTypeChange = (nextType) => {
+        setType(nextType)
+        setCategory(CATEGORIES[nextType][0])
+      }
+
+      // 등록: POST /api/transactions { type, category, amount, memo, date }
+      const handleAdd = () => {
+        const amt = Number(amount)
+        if (adding || !date || !category || !(amt > 0)) return
+
+        setAdding(true)
+        setActionError(null)
+
+        fetch(`${API_BASE_URL}/transactions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type, category, amount: amt, memo, date }),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`등록 실패 (${res.status})`)
+            return res.json()
+          })
+          .then(() => {
+            // 목록·통계 새로고침 (서버 정렬/집계 기준을 그대로 반영)
+            loadAll()
+            // 폼 초기화 (type 은 유지, 날짜는 오늘로)
+            setAmount('')
+            setMemo('')
+            setDate(todayStr())
+          })
+          .catch((err) => {
+            setActionError(err.message || '등록 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setAdding(false)
+          })
+      }
+
+      // 수정: PUT /api/transactions/:id — 성공 시 서버 응답으로 항목 갱신 + 통계 새로고침
+      const handleSave = (tx, payload, onDone) => {
+        if (busyIds.has(tx.id)) return
+
+        setActionError(null)
+        setBusy(tx.id, true)
+
+        fetch(`${API_BASE_URL}/transactions/${tx.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`수정 실패 (${res.status})`)
+            return res.json()
+          })
+          .then((updated) => {
+            setTransactions((prev) =>
+              prev.map((t) => (t.id === updated.id ? { ...t, ...updated } : t))
+            )
+            refreshStats()
+            if (onDone) onDone()
+          })
+          .catch((err) => {
+            setActionError(err.message || '수정 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusy(tx.id, false)
+          })
+      }
+
+      // 삭제: DELETE /api/transactions/:id — 낙관적 제거 후 실패 시 롤백
+      const handleDelete = (tx) => {
+        if (busyIds.has(tx.id)) return
+
+        setActionError(null)
+        setBusy(tx.id, true)
+
+        // 1) 화면에서 먼저 제거 (낙관적) — 롤백 위해 원래 위치 기억
+        let removedIndex = -1
+        setTransactions((prev) => {
+          removedIndex = prev.findIndex((t) => t.id === tx.id)
+          return prev.filter((t) => t.id !== tx.id)
+        })
+
+        fetch(`${API_BASE_URL}/transactions/${tx.id}`, { method: 'DELETE' })
+          .then((res) => {
+            if (!res.ok) throw new Error(`삭제 실패 (${res.status})`)
+            return res.json()
+          })
+          .then(() => {
+            // 삭제 성공 → 통계 갱신
+            refreshStats()
+          })
+          .catch((err) => {
+            // 2) 실패 시 원래 위치로 복구 + 에러 표시
+            setTransactions((prev) => {
+              const next = [...prev]
+              const at = removedIndex >= 0 ? removedIndex : next.length
+              next.splice(at, 0, tx)
+              return next
+            })
+            setActionError(err.message || '삭제 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBusy(tx.id, false)
+          })
+      }
+
+      // 요약 값 (stats 없으면 0)
+      const incomeTotal = stats ? stats.income_total : 0
+      const expenseTotal = stats ? stats.expense_total : 0
+      const balance = stats ? stats.balance : 0
+      const byCategory = stats && Array.isArray(stats.by_category) ? stats.by_category : []
+
+      const total = transactions.length
+
+      return (
+        <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
+          {/* 헤더 */}
+          <header className="mb-5">
+            <h1 className="text-2xl font-bold tracking-tight text-slate-800">우리집 가계부</h1>
+            <p className="text-slate-500 text-sm mt-1">수입과 지출을 기록하고 한눈에 확인하세요</p>
+          </header>
+
+          {/* 1) 상단 요약 카드 3개 */}
+          <div className="flex gap-3 mb-5">
+            <SummaryCard label="총수입" amount={incomeTotal} tone="income" />
+            <SummaryCard label="총지출" amount={expenseTotal} tone="expense" />
+            <SummaryCard label="잔액" amount={balance} tone="balance" />
+          </div>
+
+          {/* 2) 입력 폼 */}
+          <Card className="mb-5">
+            <div className="px-6 py-5">
+              <h2 className="text-sm font-semibold text-slate-700 mb-3">내역 추가</h2>
+
+              {/* 수입/지출 토글 */}
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                <Button
+                  onClick={() => handleFormTypeChange('expense')}
+                  disabled={adding}
+                  className={type === 'expense'
+                    ? 'bg-red-500 text-white'
+                    : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}
+                >
+                  지출
+                </Button>
+                <Button
+                  onClick={() => handleFormTypeChange('income')}
+                  disabled={adding}
+                  className={type === 'income'
+                    ? 'bg-emerald-500 text-white'
+                    : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}
+                >
+                  수입
+                </Button>
+              </div>
+
+              {/* 날짜 / 금액 / 카테고리 / 메모 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate-500">
+                  날짜
+                  <Input
+                    type="date"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                    disabled={adding}
+                    className="w-full"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate-500">
+                  금액
+                  <Input
+                    type="number"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="0"
+                    min="0"
+                    disabled={adding}
+                    className="w-full"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate-500">
+                  카테고리
+                  <Select
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                    disabled={adding}
+                    options={CATEGORIES[type]}
+                    className="w-full"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs font-medium text-slate-500">
+                  메모 (선택)
+                  <Input
+                    value={memo}
+                    onChange={(e) => setMemo(e.target.value)}
+                    placeholder="예: 점심 김치찌개"
+                    disabled={adding}
+                    className="w-full"
+                  />
+                </label>
+              </div>
+
+              <div className="flex justify-end mt-3">
+                <Button
+                  onClick={handleAdd}
+                  disabled={adding || !date || !(Number(amount) > 0)}
+                  className="bg-indigo-500 hover:bg-indigo-600 text-white"
+                >
+                  {adding ? '등록 중…' : '등록'}
+                </Button>
+              </div>
+
+              {/* 액션 에러 배너 (추가/수정/삭제 공통, 닫기 가능) */}
+              {actionError && (
+                <div
+                  role="alert"
+                  className="mt-3 flex items-center justify-between gap-3 px-3 py-2 rounded-lg
+                    bg-red-50 text-red-700 text-sm border border-red-100"
+                >
+                  <span className="break-words">⚠️ {actionError}</span>
+                  <button
+                    onClick={() => setActionError(null)}
+                    aria-label="에러 닫기"
+                    className="shrink-0 text-red-400 hover:text-red-600 font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {/* 3) 카테고리별 합계 패널 (로딩/에러가 아닐 때만) */}
+          {!loading && !error && byCategory.length > 0 && (
+            <Card className="mb-5">
+              <div className="px-6 py-5">
+                <h2 className="text-sm font-semibold text-slate-700 mb-3">카테고리별 합계</h2>
+                <CategoryPanel byCategory={byCategory} />
+              </div>
+            </Card>
+          )}
+
+          {/* 4) 내역 목록 */}
+          <Card>
+            <div className="px-6 py-5">
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="text-sm font-semibold text-slate-700">전체 내역</h2>
+                {!loading && !error && (
+                  <Badge className="bg-slate-100 text-slate-500">{total}건</Badge>
+                )}
+              </div>
+
+              {/* 상태별 4분기 분기 렌더링 */}
+              {loading && <LoadingState />}
+
+              {!loading && error && (
+                <ErrorState message={error} onRetry={loadAll} />
+              )}
+
+              {!loading && !error && total === 0 && <EmptyState />}
+
+              {!loading && !error && total > 0 && (
+                <ul className="flex flex-col gap-3 py-2">
+                  {transactions.map((tx) => (
+                    <TransactionItem
+                      key={tx.id}
+                      tx={tx}
+                      onSave={handleSave}
+                      onDelete={handleDelete}
+                      busy={busyIds.has(tx.id)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Card>
+
+          {/* 푸터 안내 */}
+          <p className="text-center text-xs text-slate-400 mt-6">
+            내역은 PostgreSQL 데이터베이스에 저장됩니다.
+          </p>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 🚀 App + 렌더링
+    // ========================================
+    function App() {
+      return <LedgerApp />
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "ledger-app",
+  "version": "1.0.0",
+  "description": "Supabase Postgres 를 사용하는 가계부 앱 (수입/지출 기록 + 카테고리별 합계)",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
