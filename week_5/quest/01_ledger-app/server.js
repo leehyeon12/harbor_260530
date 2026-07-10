@@ -67,6 +67,27 @@ async function initDB() {
     }
     console.log(`시드 데이터 ${seedTransactions.length}건을 입력했습니다`)
   }
+
+  // 월별 예산 테이블이 없으면 생성
+  // month 는 'YYYY-MM' 형식 문자열을 PK 로, amount 는 0 이상
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS harbor_w5_budgets (
+      month TEXT PRIMARY KEY,
+      amount NUMERIC(12,2) NOT NULL CHECK (amount >= 0),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+
+  // 예산이 0건이면 데모용 시드 1건 입력 (초과 알림 화면 확인용, 최초 1회만)
+  const budgetCountResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w5_budgets')
+  const budgetCount = Number(budgetCountResult.rows[0].cnt)
+  if (budgetCount === 0) {
+    await pool.query(
+      'INSERT INTO harbor_w5_budgets (month, amount) VALUES ($1, $2)',
+      ['2026-07', 2000000]
+    )
+    console.log('예산 시드 데이터 1건을 입력했습니다')
+  }
 }
 
 // JSON 응답 헬퍼
@@ -173,6 +194,11 @@ function validateTransaction(body) {
   return { ok: true, value: { type, category, amount, memo, date } }
 }
 
+// month 값 검증: 'YYYY-MM' 형식 문자열인지 확인
+function isValidMonth(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}$/.test(value)
+}
+
 // 라우팅
 async function handleRequest(req, res) {
   const { method } = req
@@ -180,9 +206,20 @@ async function handleRequest(req, res) {
   const pathname = url.pathname
 
   // 1. GET /api/transactions -> 목록 조회 (date DESC, id DESC)
+  // 선택 쿼리파라미터 month=YYYY-MM 이 있으면 해당 월만 필터링
   if (method === 'GET' && pathname === '/api/transactions') {
+    const month = url.searchParams.get('month')
+    // month 가 넘어온 경우에만 형식 검증 (없으면 전체 조회)
+    if (month !== null && !isValidMonth(month)) {
+      sendJson(res, 400, { error: 'month 는 YYYY-MM 형식이어야 합니다' })
+      return
+    }
+    // month 유무에 따라 WHERE 절과 바인딩 파라미터를 구성
+    const where = month ? "WHERE to_char(date, 'YYYY-MM') = $1" : ''
+    const params = month ? [month] : []
     const result = await pool.query(
-      'SELECT id, type, category, amount, memo, date, created_at FROM harbor_w5_transactions ORDER BY date DESC, id DESC'
+      `SELECT id, type, category, amount, memo, date, created_at FROM harbor_w5_transactions ${where} ORDER BY date DESC, id DESC`,
+      params
     )
     sendJson(res, 200, result.rows.map(formatRow))
     return
@@ -212,24 +249,43 @@ async function handleRequest(req, res) {
   }
 
   // 3. GET /api/stats -> 통계 (수입/지출 합계, 잔액, 카테고리별 집계)
+  // 선택 쿼리파라미터 month=YYYY-MM 이 있으면 합계/카테고리 집계 모두 해당 월로 필터링
   if (method === 'GET' && pathname === '/api/stats') {
+    const month = url.searchParams.get('month')
+    // month 가 넘어온 경우에만 형식 검증 (없으면 전체 집계)
+    if (month !== null && !isValidMonth(month)) {
+      sendJson(res, 400, { error: 'month 는 YYYY-MM 형식이어야 합니다' })
+      return
+    }
+    // 두 쿼리에 동일하게 적용할 WHERE 절과 바인딩 파라미터
+    const where = month ? "WHERE to_char(date, 'YYYY-MM') = $1" : ''
+    const params = month ? [month] : []
+
     // 수입/지출 합계
-    const totalResult = await pool.query(`
+    const totalResult = await pool.query(
+      `
       SELECT
         COALESCE(SUM(amount) FILTER (WHERE type = 'income'), 0) AS income_total,
         COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expense_total
       FROM harbor_w5_transactions
-    `)
+      ${where}
+    `,
+      params
+    )
     const incomeTotal = Number(totalResult.rows[0].income_total)
     const expenseTotal = Number(totalResult.rows[0].expense_total)
 
     // 타입+카테고리별 집계 (합계 큰 순)
-    const byCategoryResult = await pool.query(`
+    const byCategoryResult = await pool.query(
+      `
       SELECT type, category, SUM(amount) AS total, COUNT(*) AS cnt
       FROM harbor_w5_transactions
+      ${where}
       GROUP BY type, category
       ORDER BY total DESC
-    `)
+    `,
+      params
+    )
     const byCategory = byCategoryResult.rows.map((row) => ({
       type: row.type,
       category: row.category,
@@ -243,6 +299,70 @@ async function handleRequest(req, res) {
       balance: incomeTotal - expenseTotal,
       by_category: byCategory,
     })
+    return
+  }
+
+  // 7. GET /api/months -> 거래가 존재하는 월 목록 (최신순 문자열 배열)
+  if (method === 'GET' && pathname === '/api/months') {
+    const result = await pool.query(
+      "SELECT DISTINCT to_char(date, 'YYYY-MM') AS month FROM harbor_w5_transactions ORDER BY month DESC"
+    )
+    sendJson(res, 200, result.rows.map((row) => row.month))
+    return
+  }
+
+  // 8. GET /api/budget?month=YYYY-MM -> 해당 월 예산 조회
+  // month 는 필수이며 YYYY-MM 형식이어야 한다. 행이 없으면 amount 0 으로 응답
+  if (method === 'GET' && pathname === '/api/budget') {
+    const month = url.searchParams.get('month')
+    if (!isValidMonth(month)) {
+      sendJson(res, 400, { error: 'month 는 YYYY-MM 형식이어야 합니다' })
+      return
+    }
+    const result = await pool.query(
+      'SELECT month, amount FROM harbor_w5_budgets WHERE month = $1',
+      [month]
+    )
+    if (result.rowCount === 0) {
+      sendJson(res, 200, { month, amount: 0 })
+      return
+    }
+    const row = result.rows[0]
+    sendJson(res, 200, { month: row.month, amount: Number(row.amount) })
+    return
+  }
+
+  // 9. PUT /api/budget -> 월 예산 upsert (있으면 갱신, 없으면 생성)
+  if (method === 'PUT' && pathname === '/api/budget') {
+    let body
+    try {
+      body = await parseBody(req)
+    } catch (err) {
+      sendJson(res, 400, { error: '잘못된 JSON 형식입니다' })
+      return
+    }
+    // month: 'YYYY-MM' 형식 검증
+    const month = typeof body.month === 'string' ? body.month.trim() : ''
+    if (!isValidMonth(month)) {
+      sendJson(res, 400, { error: 'month 는 YYYY-MM 형식이어야 합니다' })
+      return
+    }
+    // amount: 0 이상 숫자 (숫자 형태 문자열도 허용)
+    const amount = Number(body.amount)
+    if (!Number.isFinite(amount) || amount < 0) {
+      sendJson(res, 400, { error: 'amount 는 0 이상의 숫자여야 합니다' })
+      return
+    }
+    const result = await pool.query(
+      `
+      INSERT INTO harbor_w5_budgets (month, amount) VALUES ($1, $2)
+      ON CONFLICT (month) DO UPDATE SET amount = $2, updated_at = now()
+      RETURNING month, amount
+    `,
+      [month, amount]
+    )
+    const row = result.rows[0]
+    sendJson(res, 200, { month: row.month, amount: Number(row.amount) })
     return
   }
 

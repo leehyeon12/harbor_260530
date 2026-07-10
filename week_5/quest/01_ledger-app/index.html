@@ -54,6 +54,26 @@
       return `${n.toLocaleString('ko-KR')}원`
     }
 
+    // 금액 입력 문자열에서 숫자만 추출해 Number 로: "12,000" → 12000
+    const parseAmount = (str) => {
+      const digits = String(str).replace(/[^0-9]/g, '')
+      return digits === '' ? 0 : Number(digits)
+    }
+
+    // 금액 입력용 콤마 포맷: "12000" → "12,000" (숫자만 남긴 뒤 천단위 콤마)
+    const formatAmountInput = (str) => {
+      const digits = String(str).replace(/[^0-9]/g, '')
+      if (digits === '') return ''
+      return Number(digits).toLocaleString('ko-KR')
+    }
+
+    // 월 라벨: "2026-07" → "2026년 7월"
+    const formatMonthLabel = (month) => {
+      if (!month) return '전체'
+      const [y, m] = month.split('-')
+      return `${y}년 ${Number(m)}월`
+    }
+
     // ========================================
     // 🎨 디자인 시스템 컴포넌트 (순수 프레젠테이션)
     // ========================================
@@ -88,7 +108,7 @@
     }
 
     // 입력창: 단일 라인 (controlled). type 지정 가능(number/date 등)
-    function Input({ type = 'text', value, onChange, placeholder, disabled, min, className = '' }) {
+    function Input({ type = 'text', value, onChange, placeholder, disabled, min, inputMode, className = '' }) {
       return (
         <input
           type={type}
@@ -97,6 +117,7 @@
           placeholder={placeholder}
           disabled={disabled}
           min={min}
+          inputMode={inputMode}
           className={`min-w-0 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700
             placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-300
             focus:border-indigo-300 transition disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
@@ -236,13 +257,208 @@
     }
 
     // ========================================
+    // 🧩 도넛 차트 (순수 SVG — 외부 라이브러리 없음)
+    // ========================================
+    // 총수입 대비 지출(빨강) / 남은 돈=잔액(인디고) 2세그먼트 도넛
+    function DonutChart({ income, expense }) {
+      // SVG 링 기하: 반지름·둘레 고정
+      const size = 180
+      const stroke = 22
+      const radius = (size - stroke) / 2
+      const circumference = 2 * Math.PI * radius
+      const center = size / 2
+
+      // 예외 1: 수입 0 → 빈 상태
+      if (!(income > 0)) {
+        return (
+          <div className="flex flex-col items-center justify-center py-10 gap-2 text-slate-400">
+            <div className="text-3xl">💰</div>
+            <p className="text-sm">수입 내역이 없어요</p>
+          </div>
+        )
+      }
+
+      const remain = income - expense           // 남은 돈(잔액)
+      const over = expense > income              // 지출 초과 여부
+      const expenseRatio = expense / income      // 지출 비율(0~)
+      const pct = Math.round(expenseRatio * 100) // 중앙 표시용 %
+
+      // 초과가 아니면 지출/남은돈 비율대로 두 아크를 그림
+      // 초과면 링 전체를 빨강으로 채움
+      const expenseLen = over
+        ? circumference
+        : circumference * (expense / income)
+      const remainLen = over ? 0 : circumference - expenseLen
+
+      return (
+        <div className="flex flex-col items-center gap-4">
+          <div className="relative" style={{ width: size, height: size }}>
+            <svg
+              width={size}
+              height={size}
+              viewBox={`0 0 ${size} ${size}`}
+              className="-rotate-90"
+              role="img"
+              aria-label={`지출 비율 ${over ? '초과' : pct + '퍼센트'}`}
+            >
+              {/* 바탕 트랙 */}
+              <circle
+                cx={center}
+                cy={center}
+                r={radius}
+                fill="none"
+                stroke="#e2e8f0"
+                strokeWidth={stroke}
+              />
+              {/* 남은 돈(인디고) — 지출 아크 뒤쪽에 이어서 */}
+              {!over && remainLen > 0 && (
+                <circle
+                  cx={center}
+                  cy={center}
+                  r={radius}
+                  fill="none"
+                  stroke="#6366f1"
+                  strokeWidth={stroke}
+                  strokeDasharray={`${remainLen} ${circumference - remainLen}`}
+                  strokeDashoffset={-expenseLen}
+                  strokeLinecap="butt"
+                />
+              )}
+              {/* 지출(빨강) — 12시 방향부터 */}
+              <circle
+                cx={center}
+                cy={center}
+                r={radius}
+                fill="none"
+                stroke="#ef4444"
+                strokeWidth={stroke}
+                strokeDasharray={`${expenseLen} ${circumference - expenseLen}`}
+                strokeDashoffset={0}
+                strokeLinecap="butt"
+              />
+            </svg>
+            {/* 중앙 텍스트 */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              {over ? (
+                <span className="text-xl font-bold text-red-600">초과</span>
+              ) : (
+                <>
+                  <span className="text-2xl font-bold text-slate-800">{pct}%</span>
+                  <span className="text-[11px] text-slate-400 mt-0.5">지출 비율</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* 범례 */}
+          <div className="flex items-center gap-5 text-sm">
+            <span className="flex items-center gap-1.5 text-slate-600">
+              <span className="w-3 h-3 rounded-full inline-block" style={{ background: '#ef4444' }} />
+              지출 {formatWon(expense)}
+            </span>
+            <span className="flex items-center gap-1.5 text-slate-600">
+              <span className="w-3 h-3 rounded-full inline-block" style={{ background: '#6366f1' }} />
+              남은 돈 {formatWon(remain < 0 ? 0 : remain)}
+            </span>
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🧩 예산 카드 (특정 월 선택 시만 표시)
+    // ========================================
+    // budget: { month, amount }, expenseTotal: 이번 달 총지출
+    function BudgetCard({ budget, expenseTotal, onSave, saving }) {
+      const [draft, setDraft] = useState('')
+      const amount = budget ? Number(budget.amount) || 0 : 0
+
+      // 예산 로드/변경 시 입력 필드를 콤마 포맷으로 동기화
+      useEffect(() => {
+        setDraft(amount > 0 ? amount.toLocaleString('ko-KR') : '')
+      }, [budget])
+
+      const handleSave = () => {
+        if (saving) return
+        onSave(parseAmount(draft))
+      }
+
+      // 진행률 (예산 대비 지출) — 폭은 최대 100% 캡
+      const ratio = amount > 0 ? expenseTotal / amount : 0
+      const pct = Math.round(ratio * 100)
+      const barWidth = Math.min(ratio * 100, 100)
+
+      let barColor = 'bg-indigo-500'
+      if (ratio >= 1) barColor = 'bg-red-500'
+      else if (ratio >= 0.8) barColor = 'bg-amber-500'
+
+      return (
+        <Card className="mb-5">
+          <div className="px-6 py-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-slate-700">이번 달 예산</h2>
+            </div>
+
+            {/* 예산 입력 (콤마) + 저장 */}
+            <div className="flex items-stretch gap-2 mb-3">
+              <div className="relative flex-1 min-w-0">
+                <Input
+                  type="text"
+                  inputMode="numeric"
+                  value={draft}
+                  onChange={(e) => setDraft(formatAmountInput(e.target.value))}
+                  placeholder="예산 금액"
+                  disabled={saving}
+                  className="w-full pr-8"
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 pointer-events-none">원</span>
+              </div>
+              <Button
+                onClick={handleSave}
+                disabled={saving}
+                className="bg-indigo-500 hover:bg-indigo-600 text-white shrink-0"
+              >
+                {saving ? '저장 중…' : '저장'}
+              </Button>
+            </div>
+
+            {amount > 0 ? (
+              <>
+                {/* 진행바 */}
+                <div className="w-full h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${barColor}`}
+                    style={{ width: `${barWidth}%` }}
+                  />
+                </div>
+                <p className="mt-2 text-sm text-slate-600">
+                  {formatWon(expenseTotal)} / {formatWon(amount)}
+                  <span className={`ml-1 font-semibold ${ratio >= 1 ? 'text-red-600' : ratio >= 0.8 ? 'text-amber-600' : 'text-indigo-600'}`}>
+                    ({pct}%)
+                  </span>
+                </p>
+                {ratio >= 1 && (
+                  <p className="mt-2 text-sm font-semibold text-red-600">
+                    ⚠️ 이번 달 예산을 초과했어요
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-sm text-slate-400">예산을 설정해보세요</p>
+            )}
+          </div>
+        </Card>
+      )
+    }
+
+    // ========================================
     // 🧩 내역 항목 (보기 ↔ 인라인 편집 토글)
     // ========================================
     function TransactionItem({ tx, onSave, onDelete, busy }) {
       const [editing, setEditing] = useState(false)
       const [type, setType] = useState(tx.type)
       const [category, setCategory] = useState(tx.category)
-      const [amount, setAmount] = useState(String(tx.amount))
+      const [amount, setAmount] = useState(formatAmountInput(String(tx.amount)))
       const [memo, setMemo] = useState(tx.memo || '')
       const [date, setDate] = useState(tx.date)
 
@@ -250,7 +466,7 @@
       const startEdit = () => {
         setType(tx.type)
         setCategory(tx.category)
-        setAmount(String(tx.amount))
+        setAmount(formatAmountInput(String(tx.amount)))
         setMemo(tx.memo || '')
         setDate(tx.date)
         setEditing(true)
@@ -268,7 +484,7 @@
 
       // 저장: 부모에 PUT 위임, 성공 시 보기 모드로
       const handleSave = () => {
-        const amt = Number(amount)
+        const amt = parseAmount(amount)
         if (busy || !date || !category || !(amt > 0)) return
         onSave(
           tx,
@@ -312,11 +528,11 @@
                 className="w-full"
               />
               <Input
-                type="number"
+                type="text"
+                inputMode="numeric"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onChange={(e) => setAmount(formatAmountInput(e.target.value))}
                 placeholder="금액"
-                min="0"
                 disabled={busy}
                 className="w-full"
               />
@@ -346,7 +562,7 @@
               </Button>
               <Button
                 onClick={handleSave}
-                disabled={busy || !date || !(Number(amount) > 0)}
+                disabled={busy || !date || !(parseAmount(amount) > 0)}
                 className="bg-indigo-500 hover:bg-indigo-600 text-white"
               >
                 {busy ? '저장 중…' : '저장'}
@@ -419,6 +635,15 @@
       const [error, setError] = useState(null)             // 최초/재조회 실패 (전체 화면 에러)
       const [actionError, setActionError] = useState(null) // 추가/수정/삭제 액션 에러 (배너)
 
+      // 월 필터: null=아직 월 목록 로드 전, ''=전체, 'YYYY-MM'=특정 월
+      const [months, setMonths] = useState([])             // GET /api/months (최신월 DESC)
+      const [selectedMonth, setSelectedMonth] = useState(null)
+      const [budget, setBudget] = useState(null)           // GET /api/budget (특정 월일 때만)
+      const [budgetSaving, setBudgetSaving] = useState(false)
+
+      // 선택 월을 쿼리스트링으로: 특정 월이면 ?month=, 전체('')면 생략
+      const monthQuery = selectedMonth ? `?month=${selectedMonth}` : ''
+
       // 작성 폼 상태
       const [type, setType] = useState('expense')          // 기본 '지출'
       const [date, setDate] = useState(todayStr())         // 기본값 오늘
@@ -439,24 +664,46 @@
         })
       }
 
-      // 목록 + 통계 동시 조회 (Promise.all)
+      // 월 목록 조회 (마운트/추가 후) — 최신월 DESC 문자열 배열
+      const loadMonths = () => {
+        return fetch(`${API_BASE_URL}/months`)
+          .then((res) => {
+            if (!res.ok) throw new Error(`월 목록 조회 오류 (${res.status})`)
+            return res.json()
+          })
+          .then((data) => {
+            const list = Array.isArray(data) ? data : []
+            setMonths(list)
+            return list
+          })
+      }
+
+      // 목록 + 통계 (+ 예산) 동시 조회 — 선택 월(monthQuery) 반영
       const loadAll = () => {
         setLoading(true)
         setError(null)
 
         Promise.all([
-          fetch(`${API_BASE_URL}/transactions`).then((res) => {
+          fetch(`${API_BASE_URL}/transactions${monthQuery}`).then((res) => {
             if (!res.ok) throw new Error(`내역 조회 오류 (${res.status})`)
             return res.json()
           }),
-          fetch(`${API_BASE_URL}/stats`).then((res) => {
+          fetch(`${API_BASE_URL}/stats${monthQuery}`).then((res) => {
             if (!res.ok) throw new Error(`통계 조회 오류 (${res.status})`)
             return res.json()
           }),
+          // 예산은 특정 월일 때만 조회 (전체면 null)
+          selectedMonth
+            ? fetch(`${API_BASE_URL}/budget?month=${selectedMonth}`).then((res) => {
+                if (!res.ok) throw new Error(`예산 조회 오류 (${res.status})`)
+                return res.json()
+              })
+            : Promise.resolve(null),
         ])
-          .then(([txData, statsData]) => {
+          .then(([txData, statsData, budgetData]) => {
             setTransactions(Array.isArray(txData) ? txData : [])
             setStats(statsData || null)
+            setBudget(budgetData)
           })
           .catch((err) => {
             setError(err.message || '알 수 없는 오류')
@@ -466,21 +713,46 @@
           })
       }
 
-      // 통계만 새로고침 (추가/수정/삭제 후 요약·카테고리 갱신용)
+      // 통계 + 예산 새로고침 (추가/수정/삭제 후 요약·카테고리·진행바 갱신용)
       const refreshStats = () => {
-        fetch(`${API_BASE_URL}/stats`)
+        fetch(`${API_BASE_URL}/stats${monthQuery}`)
           .then((res) => {
             if (!res.ok) throw new Error(`통계 조회 오류 (${res.status})`)
             return res.json()
           })
           .then((statsData) => setStats(statsData || null))
           .catch(() => { /* 통계 갱신 실패는 조용히 무시 (목록은 정상) */ })
+
+        // 특정 월이면 예산도 함께 갱신 (진행바 최신화)
+        if (selectedMonth) {
+          fetch(`${API_BASE_URL}/budget?month=${selectedMonth}`)
+            .then((res) => {
+              if (!res.ok) throw new Error()
+              return res.json()
+            })
+            .then((budgetData) => setBudget(budgetData))
+            .catch(() => { /* 예산 갱신 실패는 조용히 무시 */ })
+        }
       }
 
-      // 최초 마운트 시 1회 조회
+      // 최초 마운트: 월 목록 조회 후 기본 선택월 결정(최신월 or 전체)
       useEffect(() => {
-        loadAll()
+        loadMonths()
+          .then((list) => {
+            setSelectedMonth(list.length > 0 ? list[0] : '')
+          })
+          .catch((err) => {
+            // 월 목록 실패 시 전체로 폴백
+            setSelectedMonth('')
+            setError(err.message || '월 목록을 불러오지 못했어요')
+          })
       }, [])
+
+      // 선택 월이 정해지거나 바뀌면 목록·통계·예산 재조회
+      useEffect(() => {
+        if (selectedMonth === null) return // 아직 월 목록 로드 전
+        loadAll()
+      }, [selectedMonth])
 
       // 폼에서 수입/지출 토글 시 카테고리를 해당 그룹 첫 값으로 보정
       const handleFormTypeChange = (nextType) => {
@@ -490,7 +762,7 @@
 
       // 등록: POST /api/transactions { type, category, amount, memo, date }
       const handleAdd = () => {
-        const amt = Number(amount)
+        const amt = parseAmount(amount)
         if (adding || !date || !category || !(amt > 0)) return
 
         setAdding(true)
@@ -508,6 +780,8 @@
           .then(() => {
             // 목록·통계 새로고침 (서버 정렬/집계 기준을 그대로 반영)
             loadAll()
+            // 새 월이 생겼을 수 있으니 월 목록도 갱신
+            loadMonths().catch(() => {})
             // 폼 초기화 (type 은 유지, 날짜는 오늘로)
             setAmount('')
             setMemo('')
@@ -518,6 +792,31 @@
           })
           .finally(() => {
             setAdding(false)
+          })
+      }
+
+      // 예산 저장: PUT /api/budget { month, amount }
+      const handleSaveBudget = (nextAmount) => {
+        if (!selectedMonth || budgetSaving) return
+
+        setBudgetSaving(true)
+        setActionError(null)
+
+        fetch(`${API_BASE_URL}/budget`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month: selectedMonth, amount: nextAmount }),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`예산 저장 실패 (${res.status})`)
+            return res.json()
+          })
+          .then((saved) => setBudget(saved))
+          .catch((err) => {
+            setActionError(err.message || '예산 저장 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setBudgetSaving(false)
           })
       }
 
@@ -601,10 +900,29 @@
       return (
         <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
           {/* 헤더 */}
-          <header className="mb-5">
+          <header className="mb-4">
             <h1 className="text-2xl font-bold tracking-tight text-slate-800">우리집 가계부</h1>
             <p className="text-slate-500 text-sm mt-1">수입과 지출을 기록하고 한눈에 확인하세요</p>
           </header>
+
+          {/* 월 선택 바 — 라벨을 한글로 보여주기 위해 인라인 select 사용 */}
+          <div className="flex items-center gap-2 mb-5">
+            <label htmlFor="month-select" className="text-xs font-medium text-slate-500 shrink-0">조회 월</label>
+            <select
+              id="month-select"
+              value={selectedMonth === null ? '' : selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              disabled={selectedMonth === null || loading}
+              className="min-w-[8rem] px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 bg-white
+                focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300 transition
+                disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <option value="">전체</option>
+              {months.map((m) => (
+                <option key={m} value={m}>{formatMonthLabel(m)}</option>
+              ))}
+            </select>
+          </div>
 
           {/* 1) 상단 요약 카드 3개 */}
           <div className="flex gap-3 mb-5">
@@ -612,6 +930,26 @@
             <SummaryCard label="총지출" amount={expenseTotal} tone="expense" />
             <SummaryCard label="잔액" amount={balance} tone="balance" />
           </div>
+
+          {/* 지출/남은 돈 도넛 차트 (로딩/에러가 아닐 때만) */}
+          {!loading && !error && (
+            <Card className="mb-5">
+              <div className="px-6 py-5">
+                <h2 className="text-sm font-semibold text-slate-700 mb-3">수입 대비 지출</h2>
+                <DonutChart income={incomeTotal} expense={expenseTotal} />
+              </div>
+            </Card>
+          )}
+
+          {/* 예산 카드 (특정 월 선택 시만) */}
+          {!loading && !error && selectedMonth && (
+            <BudgetCard
+              budget={budget}
+              expenseTotal={expenseTotal}
+              onSave={handleSaveBudget}
+              saving={budgetSaving}
+            />
+          )}
 
           {/* 2) 입력 폼 */}
           <Card className="mb-5">
@@ -655,11 +993,11 @@
                 <label className="flex flex-col gap-1 text-xs font-medium text-slate-500">
                   금액
                   <Input
-                    type="number"
+                    type="text"
+                    inputMode="numeric"
                     value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                    onChange={(e) => setAmount(formatAmountInput(e.target.value))}
                     placeholder="0"
-                    min="0"
                     disabled={adding}
                     className="w-full"
                   />
@@ -689,7 +1027,7 @@
               <div className="flex justify-end mt-3">
                 <Button
                   onClick={handleAdd}
-                  disabled={adding || !date || !(Number(amount) > 0)}
+                  disabled={adding || !date || !(parseAmount(amount) > 0)}
                   className="bg-indigo-500 hover:bg-indigo-600 text-white"
                 >
                   {adding ? '등록 중…' : '등록'}
