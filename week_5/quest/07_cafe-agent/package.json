@@ -1,0 +1,12 @@
+{
+  "name": "cafe-agent-seed",
+  "version": "1.0.0",
+  "description": "바이턴(Bi-Turn) 카페 운영 데이터 시드 스크립트 (매출·메뉴판매·리뷰·재고)",
+  "type": "commonjs",
+  "scripts": {
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
