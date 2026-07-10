@@ -43,7 +43,7 @@ async function initDB() {
   // 거래 테이블이 없으면 생성
   // type 은 income/expense 만 허용, amount 는 0 이상, date 는 DATE 타입
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS harbor_w5_transactions (
+    CREATE TABLE IF NOT EXISTS harbor_w5_ledger_transactions (
       id SERIAL PRIMARY KEY,
       type TEXT NOT NULL CHECK (type IN ('income','expense')),
       category TEXT NOT NULL,
@@ -56,12 +56,12 @@ async function initDB() {
 
   // 데이터가 0건이면 시드 5개 입력 (한 번만)
   // created_at 은 DEFAULT now() 에 맡긴다
-  const countResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w5_transactions')
+  const countResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w5_ledger_transactions')
   const count = Number(countResult.rows[0].cnt)
   if (count === 0) {
     for (const tx of seedTransactions) {
       await pool.query(
-        'INSERT INTO harbor_w5_transactions (type, category, amount, memo, date) VALUES ($1, $2, $3, $4, $5)',
+        'INSERT INTO harbor_w5_ledger_transactions (type, category, amount, memo, date) VALUES ($1, $2, $3, $4, $5)',
         [tx.type, tx.category, tx.amount, tx.memo, tx.date]
       )
     }
@@ -71,7 +71,7 @@ async function initDB() {
   // 월별 예산 테이블이 없으면 생성
   // month 는 'YYYY-MM' 형식 문자열을 PK 로, amount 는 0 이상
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS harbor_w5_budgets (
+    CREATE TABLE IF NOT EXISTS harbor_w5_ledger_budgets (
       month TEXT PRIMARY KEY,
       amount NUMERIC(12,2) NOT NULL CHECK (amount >= 0),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -79,11 +79,11 @@ async function initDB() {
   `)
 
   // 예산이 0건이면 데모용 시드 1건 입력 (초과 알림 화면 확인용, 최초 1회만)
-  const budgetCountResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w5_budgets')
+  const budgetCountResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w5_ledger_budgets')
   const budgetCount = Number(budgetCountResult.rows[0].cnt)
   if (budgetCount === 0) {
     await pool.query(
-      'INSERT INTO harbor_w5_budgets (month, amount) VALUES ($1, $2)',
+      'INSERT INTO harbor_w5_ledger_budgets (month, amount) VALUES ($1, $2)',
       ['2026-07', 2000000]
     )
     console.log('예산 시드 데이터 1건을 입력했습니다')
@@ -218,7 +218,7 @@ async function handleRequest(req, res) {
     const where = month ? "WHERE to_char(date, 'YYYY-MM') = $1" : ''
     const params = month ? [month] : []
     const result = await pool.query(
-      `SELECT id, type, category, amount, memo, date, created_at FROM harbor_w5_transactions ${where} ORDER BY date DESC, id DESC`,
+      `SELECT id, type, category, amount, memo, date, created_at FROM harbor_w5_ledger_transactions ${where} ORDER BY date DESC, id DESC`,
       params
     )
     sendJson(res, 200, result.rows.map(formatRow))
@@ -241,7 +241,7 @@ async function handleRequest(req, res) {
     }
     const { type, category, amount, memo, date } = check.value
     const result = await pool.query(
-      'INSERT INTO harbor_w5_transactions (type, category, amount, memo, date) VALUES ($1, $2, $3, $4, $5) RETURNING id, type, category, amount, memo, date, created_at',
+      'INSERT INTO harbor_w5_ledger_transactions (type, category, amount, memo, date) VALUES ($1, $2, $3, $4, $5) RETURNING id, type, category, amount, memo, date, created_at',
       [type, category, amount, memo, date]
     )
     sendJson(res, 201, formatRow(result.rows[0]))
@@ -267,7 +267,7 @@ async function handleRequest(req, res) {
       SELECT
         COALESCE(SUM(amount) FILTER (WHERE type = 'income'), 0) AS income_total,
         COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expense_total
-      FROM harbor_w5_transactions
+      FROM harbor_w5_ledger_transactions
       ${where}
     `,
       params
@@ -279,7 +279,7 @@ async function handleRequest(req, res) {
     const byCategoryResult = await pool.query(
       `
       SELECT type, category, SUM(amount) AS total, COUNT(*) AS cnt
-      FROM harbor_w5_transactions
+      FROM harbor_w5_ledger_transactions
       ${where}
       GROUP BY type, category
       ORDER BY total DESC
@@ -305,7 +305,7 @@ async function handleRequest(req, res) {
   // 7. GET /api/months -> 거래가 존재하는 월 목록 (최신순 문자열 배열)
   if (method === 'GET' && pathname === '/api/months') {
     const result = await pool.query(
-      "SELECT DISTINCT to_char(date, 'YYYY-MM') AS month FROM harbor_w5_transactions ORDER BY month DESC"
+      "SELECT DISTINCT to_char(date, 'YYYY-MM') AS month FROM harbor_w5_ledger_transactions ORDER BY month DESC"
     )
     sendJson(res, 200, result.rows.map((row) => row.month))
     return
@@ -320,7 +320,7 @@ async function handleRequest(req, res) {
       return
     }
     const result = await pool.query(
-      'SELECT month, amount FROM harbor_w5_budgets WHERE month = $1',
+      'SELECT month, amount FROM harbor_w5_ledger_budgets WHERE month = $1',
       [month]
     )
     if (result.rowCount === 0) {
@@ -355,7 +355,7 @@ async function handleRequest(req, res) {
     }
     const result = await pool.query(
       `
-      INSERT INTO harbor_w5_budgets (month, amount) VALUES ($1, $2)
+      INSERT INTO harbor_w5_ledger_budgets (month, amount) VALUES ($1, $2)
       ON CONFLICT (month) DO UPDATE SET amount = $2, updated_at = now()
       RETURNING month, amount
     `,
@@ -393,7 +393,7 @@ async function handleRequest(req, res) {
       }
       const { type, category, amount, memo, date } = check.value
       const result = await pool.query(
-        'UPDATE harbor_w5_transactions SET type = $1, category = $2, amount = $3, memo = $4, date = $5 WHERE id = $6 RETURNING id, type, category, amount, memo, date, created_at',
+        'UPDATE harbor_w5_ledger_transactions SET type = $1, category = $2, amount = $3, memo = $4, date = $5 WHERE id = $6 RETURNING id, type, category, amount, memo, date, created_at',
         [type, category, amount, memo, date, id]
       )
       if (result.rowCount === 0) {
@@ -406,7 +406,7 @@ async function handleRequest(req, res) {
 
     // 5. DELETE /api/transactions/:id -> 삭제
     if (method === 'DELETE') {
-      const result = await pool.query('DELETE FROM harbor_w5_transactions WHERE id = $1', [id])
+      const result = await pool.query('DELETE FROM harbor_w5_ledger_transactions WHERE id = $1', [id])
       if (result.rowCount === 0) {
         sendJson(res, 404, { error: '해당 거래를 찾을 수 없습니다' })
         return
