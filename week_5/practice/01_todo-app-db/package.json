@@ -1,0 +1,12 @@
+{
+  "name": "todo-app-db",
+  "version": "1.0.0",
+  "description": "Supabase Postgres 를 사용하는 todo 앱 (서버 필요)",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

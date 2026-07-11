@@ -1,0 +1,12 @@
+{
+  "name": "recipe-app-db",
+  "version": "1.0.0",
+  "description": "Supabase Postgres 를 사용하는 레시피 CRUD 앱 (인증 없음, 서버 필요)",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
