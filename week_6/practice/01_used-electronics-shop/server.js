@@ -149,6 +149,12 @@ function getAuthUser(req) {
 // image_url 은 Unsplash 무료 이미지, price 는 중고 시세를 반영한 원(정수) 단위
 const seedProducts = [
   {
+    name: '🧪 테스트 상품 (100원)',
+    price: 100,
+    image_url: 'https://images.unsplash.com/photo-1563013544-824ae1b704d3?w=600&q=80',
+    description: '토스페이먼츠 결제 테스트용 100원 상품 · 실제 배송 없음',
+  },
+  {
     name: 'Apple iPhone 13 128GB',
     price: 620000,
     image_url: 'https://images.unsplash.com/photo-1632661674596-df8be070a5c5?w=600&q=80',
@@ -300,6 +306,20 @@ async function initDB() {
       )
     }
     console.log(`상품 시드 데이터 ${seedProducts.length}건을 입력했습니다`)
+  }
+
+  // 이미 상품이 있어도 100원 테스트 상품이 없으면 추가 (결제 테스트용, 최초 1회만)
+  const testProduct = seedProducts[0]
+  const exists = await pool.query(
+    'SELECT 1 FROM harbor_w5_shop_products WHERE name = $1 LIMIT 1',
+    [testProduct.name]
+  )
+  if (exists.rowCount === 0) {
+    await pool.query(
+      'INSERT INTO harbor_w5_shop_products (name, price, image_url, description) VALUES ($1, $2, $3, $4)',
+      [testProduct.name, testProduct.price, testProduct.image_url, testProduct.description]
+    )
+    console.log('100원 테스트 상품을 추가했습니다')
   }
 }
 
