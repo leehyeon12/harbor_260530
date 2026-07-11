@@ -11,12 +11,8 @@
 # Vercel 로컬 링크/토큰
 **/.vercel
 
-# Claude Code 런타임 임시 파일 (세션/PID 정보)
-.claude/scheduled_tasks.lock
-
-# 앤트로픽 제공 스킬 (내가 만든 게 아닌 도구 — 제출물 아님)
-.claude/skills/skill-creator/
-.claude/skills/xlsx/
+# Claude Code 설정/에이전트/스킬 (로컬 전용, 제출물 아님)
+.claude/
 
 # 강의 외 사이드 프로젝트 (각자 독립 git 저장소)
 side/
@@ -24,12 +20,9 @@ side/
 # Playwright MCP 브라우저 세션 로그/스냅샷 (디버그 산출물, 제출물 아님)
 .playwright-mcp/
 
-# 앤트로픽 공식 skills 저장소 클론 (참고용, 제출물 아님)
-skills-main/
-
 # 개인 음원 다운로드 (강의와 무관, git 추적 제외)
 week_5/practice/03_my-live-music/
 
 # 개인 세팅 참조 노트 + 프로젝트 지침 (공개 repo에 올리지 않음, 로컬 보관)
-docs/supabase-vercel-setup.md
+docs/
 CLAUDE.md
