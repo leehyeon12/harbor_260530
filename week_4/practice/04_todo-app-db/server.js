@@ -39,7 +39,7 @@ const seedTodos = [
 async function initDB() {
   // todos 테이블이 없으면 생성
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS todos (
+    CREATE TABLE IF NOT EXISTS harbor_w4_todo_todos (
       id SERIAL PRIMARY KEY,
       text TEXT NOT NULL,
       done BOOLEAN NOT NULL DEFAULT false
@@ -47,11 +47,11 @@ async function initDB() {
   `)
 
   // 데이터가 0건이면 시드 6개 입력 (한 번만)
-  const countResult = await pool.query('SELECT count(*) AS cnt FROM todos')
+  const countResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w4_todo_todos')
   const count = Number(countResult.rows[0].cnt)
   if (count === 0) {
     for (const text of seedTodos) {
-      await pool.query('INSERT INTO todos (text, done) VALUES ($1, $2)', [text, false])
+      await pool.query('INSERT INTO harbor_w4_todo_todos (text, done) VALUES ($1, $2)', [text, false])
     }
     console.log(`시드 데이터 ${seedTodos.length}건을 입력했습니다`)
   }
@@ -109,7 +109,7 @@ async function handleRequest(req, res) {
 
   // 1. GET /api/todos -> id 오름차순 배열
   if (method === 'GET' && pathname === '/api/todos') {
-    const result = await pool.query('SELECT id, text, done FROM todos ORDER BY id')
+    const result = await pool.query('SELECT id, text, done FROM harbor_w4_todo_todos ORDER BY id')
     sendJson(res, 200, result.rows)
     return
   }
@@ -129,7 +129,7 @@ async function handleRequest(req, res) {
       return
     }
     const result = await pool.query(
-      'INSERT INTO todos (text, done) VALUES ($1, $2) RETURNING id, text, done',
+      'INSERT INTO harbor_w4_todo_todos (text, done) VALUES ($1, $2) RETURNING id, text, done',
       [text, false]
     )
     sendJson(res, 201, result.rows[0])
@@ -161,7 +161,7 @@ async function handleRequest(req, res) {
         return
       }
       const result = await pool.query(
-        'UPDATE todos SET done = $1 WHERE id = $2 RETURNING id, text, done',
+        'UPDATE harbor_w4_todo_todos SET done = $1 WHERE id = $2 RETURNING id, text, done',
         [body.done, id]
       )
       if (result.rowCount === 0) {
@@ -174,7 +174,7 @@ async function handleRequest(req, res) {
 
     // 4. DELETE /api/todos/:id -> 삭제
     if (method === 'DELETE') {
-      const result = await pool.query('DELETE FROM todos WHERE id = $1', [id])
+      const result = await pool.query('DELETE FROM harbor_w4_todo_todos WHERE id = $1', [id])
       if (result.rowCount === 0) {
         sendJson(res, 404, { error: '해당 todo 를 찾을 수 없습니다' })
         return

@@ -69,7 +69,7 @@ const seedIngredients = [
 async function initDB() {
   // ingredients(재료) 테이블이 없으면 생성 — Q2 그대로
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS ingredients (
+    CREATE TABLE IF NOT EXISTS harbor_w4_recipe_ingredients (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       quantity TEXT,
@@ -81,7 +81,7 @@ async function initDB() {
 
   // recipes(레시피) 테이블이 없으면 기본 형태로 생성 — Q2 컬럼 구성
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS recipes (
+    CREATE TABLE IF NOT EXISTS harbor_w4_recipe_recipes (
       id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       ingredients TEXT,
@@ -91,18 +91,18 @@ async function initDB() {
   `)
 
   // recipes 확장 컬럼 4개를 각각 추가 (이미 있으면 무시됨)
-  await pool.query('ALTER TABLE recipes ADD COLUMN IF NOT EXISTS cook_time TEXT')
-  await pool.query('ALTER TABLE recipes ADD COLUMN IF NOT EXISTS difficulty TEXT')
-  await pool.query('ALTER TABLE recipes ADD COLUMN IF NOT EXISTS style TEXT')
-  await pool.query('ALTER TABLE recipes ADD COLUMN IF NOT EXISTS thumbnail_url TEXT')
+  await pool.query('ALTER TABLE harbor_w4_recipe_recipes ADD COLUMN IF NOT EXISTS cook_time TEXT')
+  await pool.query('ALTER TABLE harbor_w4_recipe_recipes ADD COLUMN IF NOT EXISTS difficulty TEXT')
+  await pool.query('ALTER TABLE harbor_w4_recipe_recipes ADD COLUMN IF NOT EXISTS style TEXT')
+  await pool.query('ALTER TABLE harbor_w4_recipe_recipes ADD COLUMN IF NOT EXISTS thumbnail_url TEXT')
 
   // 재료가 0건이면 시드 6개 입력 (한 번만). expiry 는 null 로 둔다
-  const countResult = await pool.query('SELECT count(*) AS cnt FROM ingredients')
+  const countResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w4_recipe_ingredients')
   const count = Number(countResult.rows[0].cnt)
   if (count === 0) {
     for (const item of seedIngredients) {
       await pool.query(
-        'INSERT INTO ingredients (name, quantity, category, expiry) VALUES ($1, $2, $3, $4)',
+        'INSERT INTO harbor_w4_recipe_ingredients (name, quantity, category, expiry) VALUES ($1, $2, $3, $4)',
         [item.name, item.quantity, item.category, null]
       )
     }
@@ -266,7 +266,7 @@ async function handleIngredients(req, res, url, pathname) {
 
     const result = await pool.query(
       `SELECT id, name, quantity, category, expiry, created_at
-       FROM ingredients ${whereClause}
+       FROM harbor_w4_recipe_ingredients ${whereClause}
        ORDER BY created_at DESC, id DESC`,
       params
     )
@@ -293,7 +293,7 @@ async function handleIngredients(req, res, url, pathname) {
     const category = normalizeOrNull(body.category)
     const expiry = normalizeOrNull(body.expiry)
     const result = await pool.query(
-      `INSERT INTO ingredients (name, quantity, category, expiry)
+      `INSERT INTO harbor_w4_recipe_ingredients (name, quantity, category, expiry)
        VALUES ($1, $2, $3, $4)
        RETURNING id, name, quantity, category, expiry, created_at`,
       [name, quantity, category, expiry]
@@ -331,7 +331,7 @@ async function handleIngredients(req, res, url, pathname) {
       const category = normalizeOrNull(body.category)
       const expiry = normalizeOrNull(body.expiry)
       const result = await pool.query(
-        `UPDATE ingredients
+        `UPDATE harbor_w4_recipe_ingredients
          SET name = $1, quantity = $2, category = $3, expiry = $4
          WHERE id = $5
          RETURNING id, name, quantity, category, expiry, created_at`,
@@ -347,7 +347,7 @@ async function handleIngredients(req, res, url, pathname) {
 
     // 4. DELETE /api/ingredients/:id -> 삭제
     if (method === 'DELETE') {
-      const result = await pool.query('DELETE FROM ingredients WHERE id = $1', [id])
+      const result = await pool.query('DELETE FROM harbor_w4_recipe_ingredients WHERE id = $1', [id])
       if (result.rowCount === 0) {
         sendJson(res, 404, { error: '해당 재료를 찾을 수 없습니다' })
         return true
@@ -377,7 +377,7 @@ async function handleRecipes(req, res, url, pathname) {
     if (keyword !== '') {
       const result = await pool.query(
         `SELECT id, title, ingredients, steps, cook_time, difficulty, style, thumbnail_url, created_at
-         FROM recipes
+         FROM harbor_w4_recipe_recipes
          WHERE title ILIKE $1 OR ingredients ILIKE $1
          ORDER BY created_at DESC, id DESC`,
         [`%${keyword}%`]
@@ -387,7 +387,7 @@ async function handleRecipes(req, res, url, pathname) {
     }
     const result = await pool.query(
       `SELECT id, title, ingredients, steps, cook_time, difficulty, style, thumbnail_url, created_at
-       FROM recipes
+       FROM harbor_w4_recipe_recipes
        ORDER BY created_at DESC, id DESC`
     )
     sendJson(res, 200, result.rows)
@@ -417,7 +417,7 @@ async function handleRecipes(req, res, url, pathname) {
     const style = normalizeOrNull(body.style)
     const thumbnailUrl = normalizeOrNull(body.thumbnail_url)
     const result = await pool.query(
-      `INSERT INTO recipes (title, ingredients, steps, cook_time, difficulty, style, thumbnail_url)
+      `INSERT INTO harbor_w4_recipe_recipes (title, ingredients, steps, cook_time, difficulty, style, thumbnail_url)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, title, ingredients, steps, cook_time, difficulty, style, thumbnail_url, created_at`,
       [title, ingredients, steps, cookTime, difficulty, style, thumbnailUrl]
@@ -456,7 +456,7 @@ async function handleRecipes(req, res, url, pathname) {
       // 확장 컬럼(cook_time 등)은 SET 에서 제외 → 기존 값이 그대로 유지된다.
       // RETURNING 에는 포함해 프론트가 최신 전체 row 를 받게 한다.
       const result = await pool.query(
-        `UPDATE recipes
+        `UPDATE harbor_w4_recipe_recipes
          SET title = $1, ingredients = $2, steps = $3
          WHERE id = $4
          RETURNING id, title, ingredients, steps, cook_time, difficulty, style, thumbnail_url, created_at`,
@@ -472,7 +472,7 @@ async function handleRecipes(req, res, url, pathname) {
 
     // 4. DELETE /api/recipes/:id -> 삭제
     if (method === 'DELETE') {
-      const result = await pool.query('DELETE FROM recipes WHERE id = $1', [id])
+      const result = await pool.query('DELETE FROM harbor_w4_recipe_recipes WHERE id = $1', [id])
       if (result.rowCount === 0) {
         sendJson(res, 404, { error: '해당 레시피를 찾을 수 없습니다' })
         return true
@@ -513,7 +513,7 @@ async function handleGenerateRecipe(req, res, pathname) {
   const style = typeof body.style === 'string' ? body.style.trim() : ''
 
   // (2) 냉장고 재료 전체 조회 (이름 + 수량)
-  const ingResult = await pool.query('SELECT name, quantity FROM ingredients')
+  const ingResult = await pool.query('SELECT name, quantity FROM harbor_w4_recipe_ingredients')
   if (ingResult.rows.length === 0) {
     sendJson(res, 400, { error: '냉장고에 재료가 없습니다. 먼저 재료를 추가하세요.' })
     return true

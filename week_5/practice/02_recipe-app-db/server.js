@@ -32,7 +32,7 @@ async function initDB() {
   // simple_recipes 테이블이 없으면 생성
   // 기존 recipes 테이블과 충돌을 피하기 위해 별도 이름을 사용
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS simple_recipes (
+    CREATE TABLE IF NOT EXISTS harbor_w5_recipe_simple_recipes (
       id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       ingredients TEXT NOT NULL DEFAULT '',
@@ -112,7 +112,7 @@ async function handleRequest(req, res) {
     // 1. GET /api/recipes -> 전체 목록 (최신순)
     if (method === 'GET' && pathname === '/api/recipes') {
       const result = await pool.query(
-        'SELECT id, title, ingredients, steps, created_at FROM simple_recipes ORDER BY created_at DESC, id DESC'
+        'SELECT id, title, ingredients, steps, created_at FROM harbor_w5_recipe_simple_recipes ORDER BY created_at DESC, id DESC'
       )
       sendJson(res, 200, result.rows)
       return
@@ -133,7 +133,7 @@ async function handleRequest(req, res) {
         return
       }
       const result = await pool.query(
-        `INSERT INTO simple_recipes (title, ingredients, steps)
+        `INSERT INTO harbor_w5_recipe_simple_recipes (title, ingredients, steps)
          VALUES ($1, $2, $3)
          RETURNING id, title, ingredients, steps, created_at`,
         [recipe.title, recipe.ingredients, recipe.steps]
@@ -167,7 +167,7 @@ async function handleRequest(req, res) {
           return
         }
         const result = await pool.query(
-          `UPDATE simple_recipes
+          `UPDATE harbor_w5_recipe_simple_recipes
            SET title = $1, ingredients = $2, steps = $3
            WHERE id = $4
            RETURNING id, title, ingredients, steps, created_at`,
@@ -183,7 +183,7 @@ async function handleRequest(req, res) {
 
       // 4. DELETE /api/recipes/:id -> 삭제
       if (method === 'DELETE') {
-        const result = await pool.query('DELETE FROM simple_recipes WHERE id = $1', [id])
+        const result = await pool.query('DELETE FROM harbor_w5_recipe_simple_recipes WHERE id = $1', [id])
         if (result.rowCount === 0) {
           sendJson(res, 404, { error: '해당 레시피를 찾을 수 없습니다' })
           return

@@ -37,7 +37,7 @@ const seedMemos = [
 async function initDB() {
   // memos 테이블이 없으면 생성
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS memos (
+    CREATE TABLE IF NOT EXISTS harbor_w4_memo_memos (
       id SERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       content TEXT NOT NULL DEFAULT '',
@@ -47,11 +47,11 @@ async function initDB() {
 
   // 데이터가 0건이면 시드 3개 입력 (한 번만)
   // created_at 은 DEFAULT now() 에 맡긴다
-  const countResult = await pool.query('SELECT count(*) AS cnt FROM memos')
+  const countResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w4_memo_memos')
   const count = Number(countResult.rows[0].cnt)
   if (count === 0) {
     for (const memo of seedMemos) {
-      await pool.query('INSERT INTO memos (title, content) VALUES ($1, $2)', [memo.title, memo.content])
+      await pool.query('INSERT INTO harbor_w4_memo_memos (title, content) VALUES ($1, $2)', [memo.title, memo.content])
     }
     console.log(`시드 데이터 ${seedMemos.length}건을 입력했습니다`)
   }
@@ -115,7 +115,7 @@ async function handleRequest(req, res) {
     if (keyword !== '') {
       // 제목 또는 내용에 검색어가 포함된 메모만 (대소문자 무시 ILIKE)
       const result = await pool.query(
-        'SELECT id, title, content, created_at FROM memos WHERE title ILIKE $1 OR content ILIKE $1 ORDER BY created_at DESC, id DESC',
+        'SELECT id, title, content, created_at FROM harbor_w4_memo_memos WHERE title ILIKE $1 OR content ILIKE $1 ORDER BY created_at DESC, id DESC',
         [`%${keyword}%`]
       )
       sendJson(res, 200, result.rows)
@@ -123,7 +123,7 @@ async function handleRequest(req, res) {
     }
     // q 없으면 전체 조회
     const result = await pool.query(
-      'SELECT id, title, content, created_at FROM memos ORDER BY created_at DESC, id DESC'
+      'SELECT id, title, content, created_at FROM harbor_w4_memo_memos ORDER BY created_at DESC, id DESC'
     )
     sendJson(res, 200, result.rows)
     return
@@ -146,7 +146,7 @@ async function handleRequest(req, res) {
     // content 는 선택값: 문자열이 아니면 빈 문자열로 처리
     const content = typeof body.content === 'string' ? body.content : ''
     const result = await pool.query(
-      'INSERT INTO memos (title, content) VALUES ($1, $2) RETURNING id, title, content, created_at',
+      'INSERT INTO harbor_w4_memo_memos (title, content) VALUES ($1, $2) RETURNING id, title, content, created_at',
       [title, content]
     )
     sendJson(res, 201, result.rows[0])
@@ -181,7 +181,7 @@ async function handleRequest(req, res) {
       // content 는 선택값: 문자열이 아니면 빈 문자열로 처리
       const content = typeof body.content === 'string' ? body.content : ''
       const result = await pool.query(
-        'UPDATE memos SET title = $1, content = $2 WHERE id = $3 RETURNING id, title, content, created_at',
+        'UPDATE harbor_w4_memo_memos SET title = $1, content = $2 WHERE id = $3 RETURNING id, title, content, created_at',
         [title, content, id]
       )
       if (result.rowCount === 0) {
@@ -194,7 +194,7 @@ async function handleRequest(req, res) {
 
     // 4. DELETE /api/memos/:id -> 삭제
     if (method === 'DELETE') {
-      const result = await pool.query('DELETE FROM memos WHERE id = $1', [id])
+      const result = await pool.query('DELETE FROM harbor_w4_memo_memos WHERE id = $1', [id])
       if (result.rowCount === 0) {
         sendJson(res, 404, { error: '해당 메모를 찾을 수 없습니다' })
         return

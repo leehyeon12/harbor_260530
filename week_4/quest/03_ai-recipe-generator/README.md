@@ -6,7 +6,7 @@ week_4 퀘스트 Q3 제출물 (Server + DB + AI).
 ## 개요
 
 - **AI**: OpenAI `gpt-4o-mini` — 재료 목록을 받아 레시피(제목·재료·조리법·조리시간·난이도)를 JSON으로 생성
-- **저장소**: Supabase PostgreSQL — 재료(`ingredients`) + AI 생성 레시피(`recipes`) 영구 저장. **Q2와 같은 DB·테이블을 재활용**한다.
+- **저장소**: Supabase PostgreSQL — 재료(`harbor_w4_recipe_ingredients`) + AI 생성 레시피(`harbor_w4_recipe_recipes`) 영구 저장. **Q2와 같은 DB·테이블을 재활용**한다.
 - **백엔드**: Node.js 내장 `http` 모듈 + `pg`(node-postgres) — 외부 프레임워크 없음
 - **프론트**: React 18 + Tailwind CSS + Babel (CDN, 빌드 도구 없이 단일 `index.html`)
 - **썸네일**: Pollinations(무료, API 키 불필요)로 레시피 이미지 자동 생성
@@ -50,9 +50,9 @@ npm start
 
 ## DB 스키마
 
-Q2의 `ingredients` / `recipes` 테이블을 그대로 재활용하고, `recipes` 에 AI 메타 컬럼 4개를 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 로 추가한다(기존 데이터 보존).
+Q2의 `harbor_w4_recipe_ingredients` / `harbor_w4_recipe_recipes` 테이블을 그대로 재활용하고, `harbor_w4_recipe_recipes` 에 AI 메타 컬럼 4개를 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 로 추가한다(기존 데이터 보존).
 
-### `ingredients` (재료) — Q2와 동일
+### `harbor_w4_recipe_ingredients` (재료) — Q2와 동일
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `id` | SERIAL PK | 식별자 |
@@ -62,7 +62,7 @@ Q2의 `ingredients` / `recipes` 테이블을 그대로 재활용하고, `recipes
 | `expiry` | DATE | 유통기한 |
 | `created_at` | TIMESTAMPTZ | 등록 시각 |
 
-### `recipes` (레시피) — Q2 + AI 메타 컬럼
+### `harbor_w4_recipe_recipes` (레시피) — Q2 + AI 메타 컬럼
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `id` | SERIAL PK | 식별자 |

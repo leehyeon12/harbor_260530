@@ -144,7 +144,7 @@ function getAuthUser(req) {
 async function initDB() {
   // users 테이블: 회원가입 계정 저장
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS harbor_w5_todo_users (
       id SERIAL PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
@@ -154,7 +154,7 @@ async function initDB() {
 
   // todos 테이블이 없으면 생성
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS todos (
+    CREATE TABLE IF NOT EXISTS harbor_w4_todo_todos (
       id SERIAL PRIMARY KEY,
       text TEXT NOT NULL,
       done BOOLEAN NOT NULL DEFAULT false
@@ -164,7 +164,7 @@ async function initDB() {
   // 기존 todos 테이블에 user_id 컬럼이 없으면 추가 (사용자별 분리용 마이그레이션)
   // 기존(주인 없는) todo 데이터는 user_id 가 NULL 로 남아 어떤 사용자에게도 보이지 않는다.
   await pool.query(`
-    ALTER TABLE todos ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)
+    ALTER TABLE harbor_w4_todo_todos ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES harbor_w5_todo_users(id)
   `)
 }
 
@@ -242,7 +242,7 @@ async function handleRegister(req, res) {
   const passwordHash = hashPassword(cred.password)
   try {
     const result = await pool.query(
-      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username',
+      'INSERT INTO harbor_w5_todo_users (username, password_hash) VALUES ($1, $2) RETURNING id, username',
       [cred.username, passwordHash]
     )
     const user = result.rows[0]
@@ -275,7 +275,7 @@ async function handleLogin(req, res) {
   }
 
   const result = await pool.query(
-    'SELECT id, username, password_hash FROM users WHERE username = $1',
+    'SELECT id, username, password_hash FROM harbor_w5_todo_users WHERE username = $1',
     [username]
   )
   const user = result.rows[0]
@@ -319,7 +319,7 @@ async function handleRequest(req, res) {
     // 1. GET /api/todos -> 본인 todo 만 id 오름차순
     if (method === 'GET' && pathname === '/api/todos') {
       const result = await pool.query(
-        'SELECT id, text, done FROM todos WHERE user_id = $1 ORDER BY id',
+        'SELECT id, text, done FROM harbor_w4_todo_todos WHERE user_id = $1 ORDER BY id',
         [userId]
       )
       sendJson(res, 200, result.rows)
@@ -341,7 +341,7 @@ async function handleRequest(req, res) {
         return
       }
       const result = await pool.query(
-        'INSERT INTO todos (text, done, user_id) VALUES ($1, $2, $3) RETURNING id, text, done',
+        'INSERT INTO harbor_w4_todo_todos (text, done, user_id) VALUES ($1, $2, $3) RETURNING id, text, done',
         [text, false, userId]
       )
       sendJson(res, 201, result.rows[0])
@@ -372,7 +372,7 @@ async function handleRequest(req, res) {
           return
         }
         const result = await pool.query(
-          'UPDATE todos SET done = $1 WHERE id = $2 AND user_id = $3 RETURNING id, text, done',
+          'UPDATE harbor_w4_todo_todos SET done = $1 WHERE id = $2 AND user_id = $3 RETURNING id, text, done',
           [body.done, id, userId]
         )
         if (result.rowCount === 0) {
@@ -386,7 +386,7 @@ async function handleRequest(req, res) {
       // 4. DELETE /api/todos/:id -> 삭제 (본인 것만)
       if (method === 'DELETE') {
         const result = await pool.query(
-          'DELETE FROM todos WHERE id = $1 AND user_id = $2',
+          'DELETE FROM harbor_w4_todo_todos WHERE id = $1 AND user_id = $2',
           [id, userId]
         )
         if (result.rowCount === 0) {

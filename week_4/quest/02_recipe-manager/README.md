@@ -40,7 +40,7 @@ npm start
 
 ## DB 스키마
 
-### `ingredients` (재료)
+### `harbor_w4_recipe_ingredients` (재료)
 
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
@@ -51,7 +51,7 @@ npm start
 | `expiry` | DATE | 유통기한 (없으면 null) |
 | `created_at` | TIMESTAMPTZ | 등록 시각 (기본값 now()) |
 
-### `recipes` (레시피)
+### `harbor_w4_recipe_recipes` (레시피)
 
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
@@ -104,7 +104,7 @@ npm start
 ## 스크린샷
 
 ### 앱 동작 + DB 저장
-앱에서 재료(만두)를 추가하면 Supabase `ingredients` 테이블에 실제로 저장된다 (왼쪽 앱 / 오른쪽 Supabase Table Editor).
+앱에서 재료(만두)를 추가하면 Supabase `harbor_w4_recipe_ingredients` 테이블에 실제로 저장된다 (왼쪽 앱 / 오른쪽 Supabase Table Editor).
 
 ![앱 동작 화면과 Supabase 테이블](./screenshot-app.png)
 
