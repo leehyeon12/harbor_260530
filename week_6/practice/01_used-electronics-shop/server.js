@@ -10,15 +10,15 @@ const process = require('node:process')
 const crypto = require('node:crypto')
 const { Pool } = require('pg')
 
-// .env 로드: repo 루트(harbor_260530/.env)를 먼저 시도하고, 없으면 로컬 폴백
-// __dirname = .../week_5/quest/04_used-electronics-shop 이므로 3단계 위가 repo 루트
+// .env 로드: 프로젝트 로컬 값(JWT_SECRET 등 개별 키)을 먼저 채우고,
+// 없는 값은 repo 루트(harbor_260530/.env) 공통값(DATABASE_URL 등)으로 보완한다.
+// loadEnvFile은 이미 설정된 process.env 값을 덮어쓰지 않으므로 로컬이 항상 우선한다.
+try {
+  process.loadEnvFile()
+} catch {}
 try {
   process.loadEnvFile(path.resolve(__dirname, '../../../.env'))
-} catch {
-  try {
-    process.loadEnvFile()
-  } catch {}
-}
+} catch {}
 
 const PORT = process.env.PORT || 3000
 // 환경변수 끝의 개행/공백이 붙어오는 경우가 있어 .trim() 으로 정리
