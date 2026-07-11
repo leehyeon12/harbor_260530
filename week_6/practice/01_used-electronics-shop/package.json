@@ -1,0 +1,12 @@
+{
+  "name": "used-electronics-shop",
+  "version": "1.0.0",
+  "description": "중고 전자기기 쇼핑몰 (로그인/회원가입 + 사용자별 장바구니, Supabase Postgres + 자체 JWT)",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
