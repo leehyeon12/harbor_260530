@@ -158,7 +158,7 @@ async function uploadToImageKit(base64Data, fileName) {
   const form = new FormData()
   form.append('file', pureBase64)
   form.append('fileName', fileName || 'product')
-  form.append('folder', '/harbor-w6-products')
+  form.append('folder', '/harbor')
   form.append('useUniqueFileName', 'true')
 
   // Basic 인증: base64(privateKey + ":") — 사용자명이 privateKey, 비밀번호는 빈 값
