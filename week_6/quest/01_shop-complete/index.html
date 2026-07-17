@@ -17,6 +17,9 @@
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
 
+  <!-- 토스페이먼츠 결제위젯 SDK v2 (전역 TossPayments 함수 노출) -->
+  <script src="https://js.tosspayments.com/v2/standard"></script>
+
   <style>
     /* 토스트 등장 애니메이션 (Tailwind 유틸로 표현하기 어려운 keyframe) */
     @keyframes toast-in {
@@ -37,6 +40,11 @@
 
     // 같은 출처(same-origin)로 서빙되므로 상대경로 사용 (localhost 하드코딩 금지)
     const API_BASE_URL = '/api'
+
+    // 토스페이먼츠 결제위젯 클라이언트 키 (공개돼도 되는 키 — 프론트 노출 OK)
+    // 강사가 준 공용 docs 시크릿키(test_gsk_docs_...)와 짝이 되는 docs 클라이언트 키.
+    // ⚠️ 시크릿키(승인용)는 서버 .env 에만 두고, 절대 여기 넣지 않는다.
+    const TOSS_CLIENT_KEY = 'test_gck_docs_Ovk5rk1EwkEbP0W43n07xlzm'
     // JWT 토큰 / 사용자 정보를 저장할 localStorage 키
     const TOKEN_KEY = 'shop_token'
     const USER_KEY = 'shop_user'
@@ -654,12 +662,13 @@
     // ========================================
     // 📄 장바구니 뷰 (로그인 필요)
     // ========================================
-    function CartView({ apiFetch, onBack, onCartChange }) {
+    function CartView({ apiFetch, onBack, onCartChange, onProceedToPayment }) {
       const [items, setItems] = useState([])
       const [loading, setLoading] = useState(true)
       const [error, setError] = useState(null)
       const [actionError, setActionError] = useState(null)
       const [busyIds, setBusyIds] = useState(new Set())
+      const [checkingOut, setCheckingOut] = useState(false) // 주문 생성 중
 
       const setBusy = (id, on) => {
         setBusyIds((prev) => {
@@ -776,6 +785,30 @@
       )
       const count = items.length
 
+      // "결제하기" → POST /api/orders 로 주문 생성(서버가 금액 확정) → 결제 화면으로 이동
+      const handleCheckout = () => {
+        if (checkingOut) return
+        setActionError(null)
+        setCheckingOut(true)
+
+        apiFetch(`${API_BASE_URL}/orders`, { method: 'POST' })
+          .then(async (res) => {
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.error || `주문 생성 실패 (${res.status})`)
+            return data
+          })
+          .then((order) => {
+            // order: { orderId, amount, orderName } → 상위(App)가 결제 화면으로 전환
+            onProceedToPayment(order)
+          })
+          .catch((err) => {
+            setActionError(err.message || '주문 생성 중 오류가 발생했어요')
+          })
+          .finally(() => {
+            setCheckingOut(false)
+          })
+      }
+
       return (
         <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
           {/* 상단 바 */}
@@ -857,10 +890,11 @@
                   </div>
 
                   <Button
-                    disabled
-                    className="mt-4 w-full bg-slate-800 text-white opacity-90 cursor-default"
+                    onClick={handleCheckout}
+                    disabled={checkingOut}
+                    className="mt-4 w-full bg-indigo-500 hover:bg-indigo-600 text-white"
                   >
-                    주문하기 (데모)
+                    {checkingOut ? '주문 생성 중…' : `${formatWon(total)} 결제하기`}
                   </Button>
                 </>
               )}
@@ -1045,15 +1079,169 @@
     }
 
     // ========================================
+    // 💳 결제 화면 (토스 결제위젯 렌더 + 결제 요청)
+    // ========================================
+    // order: { orderId, amount, orderName } — CartView 가 POST /api/orders 로 받아 넘겨준 값
+    function PaymentView({ order, user, onBack }) {
+      const [ready, setReady] = useState(false)   // 위젯 렌더 완료 여부
+      const [error, setError] = useState(null)
+      const [paying, setPaying] = useState(false)
+      // 토스 widgets 인스턴스를 결제 요청 때 다시 써야 하므로 ref 에 보관
+      const widgetsRef = useRef(null)
+
+      // 마운트 시: 위젯 초기화 → 금액 설정 → 결제수단/약관 UI 렌더
+      useEffect(() => {
+        let cancelled = false
+
+        async function initWidget() {
+          try {
+            // 전역 TossPayments 함수(SDK 스크립트가 로드해줌)로 인스턴스 생성
+            const tossPayments = TossPayments(TOSS_CLIENT_KEY)
+            // customerKey: 이 고객을 식별하는 키 (회원별 고정)
+            const widgets = tossPayments.widgets({ customerKey: `customer_${user.id}` })
+            widgetsRef.current = widgets
+
+            // 결제 금액 설정 (★ 서버가 확정한 order.amount 를 그대로 사용)
+            await widgets.setAmount({ currency: 'KRW', value: order.amount })
+
+            // 결제수단 선택 UI + 약관 동의 UI 를 각 컨테이너에 렌더
+            await Promise.all([
+              widgets.renderPaymentMethods({ selector: '#payment-methods', variantKey: 'DEFAULT' }),
+              widgets.renderAgreement({ selector: '#agreement', variantKey: 'AGREEMENT' }),
+            ])
+
+            if (!cancelled) setReady(true)
+          } catch (err) {
+            if (!cancelled) setError(err.message || '결제 위젯을 불러오지 못했어요')
+          }
+        }
+
+        initWidget()
+        return () => { cancelled = true }
+      }, [order, user])
+
+      // "결제하기" → 토스 결제창 요청. 성공하면 successUrl 로 리다이렉트되며
+      // paymentKey/orderId/amount 가 쿼리스트링으로 붙어 돌아온다. (승인은 다음 단계)
+      const handlePay = async () => {
+        if (!widgetsRef.current || paying) return
+        setPaying(true)
+        setError(null)
+        try {
+          await widgetsRef.current.requestPayment({
+            orderId: order.orderId,
+            orderName: order.orderName,
+            successUrl: `${window.location.origin}/?payment=success`,
+            failUrl: `${window.location.origin}/?payment=fail`,
+          })
+        } catch (err) {
+          // 사용자가 결제창을 닫는 등으로 취소되면 여기로 온다
+          setError(err.message || '결제가 취소되었어요')
+          setPaying(false)
+        }
+      }
+
+      return (
+        <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
+          <div className="flex items-center gap-3 mb-5">
+            <button
+              onClick={onBack}
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold text-slate-600
+                bg-white shadow hover:bg-slate-50 transition-colors"
+            >
+              ← 장바구니로
+            </button>
+            <h1 className="text-xl font-bold tracking-tight text-slate-800">결제</h1>
+          </div>
+
+          <Card>
+            <div className="px-6 py-5">
+              {/* 주문 요약 */}
+              <div className="mb-4 pb-4 border-b border-slate-200">
+                <p className="text-sm text-slate-500">{order.orderName}</p>
+                <p className="text-2xl font-bold text-indigo-600 mt-1">{formatWon(order.amount)}</p>
+              </div>
+
+              {error && (
+                <div
+                  role="alert"
+                  className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg
+                    bg-red-50 text-red-700 text-sm border border-red-100"
+                >
+                  <span className="break-words">⚠️ {error}</span>
+                </div>
+              )}
+
+              {/* 토스 위젯이 그려질 컨테이너들 */}
+              <div id="payment-methods" />
+              <div id="agreement" />
+
+              <Button
+                onClick={handlePay}
+                disabled={!ready || paying}
+                className="mt-4 w-full bg-indigo-500 hover:bg-indigo-600 text-white"
+              >
+                {paying ? '결제창을 여는 중…' : ready ? `${formatWon(order.amount)} 결제하기` : '결제 수단 불러오는 중…'}
+              </Button>
+            </div>
+          </Card>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 🧾 결제 결과 화면 (승인 처리 중 / 성공 / 실패)
+    // ========================================
+    // status: 'confirming' | 'success' | 'fail'
+    function PaymentResultView({ status, message, onGoHome }) {
+      const isSuccess = status === 'success'
+      const isConfirming = status === 'confirming'
+      return (
+        <main className="max-w-md mx-auto px-4 py-16">
+          <Card className="p-8 flex flex-col items-center text-center gap-4">
+            {isConfirming ? (
+              <>
+                <Spinner />
+                <p className="text-slate-600 font-medium">결제를 승인하는 중이에요…</p>
+              </>
+            ) : isSuccess ? (
+              <>
+                <div className="text-5xl">✅</div>
+                <h2 className="text-xl font-bold text-slate-800">결제가 완료되었어요!</h2>
+                <p className="text-sm text-slate-500 break-words">{message}</p>
+              </>
+            ) : (
+              <>
+                <div className="text-5xl">❌</div>
+                <h2 className="text-xl font-bold text-slate-800">결제에 실패했어요</h2>
+                <p className="text-sm text-slate-500 break-words">{message}</p>
+              </>
+            )}
+
+            {!isConfirming && (
+              <Button
+                onClick={onGoHome}
+                className="mt-2 bg-indigo-500 hover:bg-indigo-600 text-white px-6"
+              >
+                쇼핑 계속하기
+              </Button>
+            )}
+          </Card>
+        </main>
+      )
+    }
+
+    // ========================================
     // 🚀 App: 전체 상태 조율 (뷰 전환 / 인증 / 장바구니 개수)
     // ========================================
     function App() {
       // 새로고침해도 유지되도록 localStorage 에서 초기값 로드
       const [user, setUser] = useState(() => authStore.getUser())
-      const [view, setView] = useState('products') // 'products' | 'cart'
+      const [view, setView] = useState('products') // 'products' | 'cart' | 'payment'
       const [authOpen, setAuthOpen] = useState(false) // 로그인 모달 표시 여부
       const [cartCount, setCartCount] = useState(0)   // 헤더 배지용 총 수량
       const [toast, setToast] = useState(null)        // 담기 피드백 토스트
+      const [order, setOrder] = useState(null)        // 결제 진행 중인 주문 { orderId, amount, orderName }
+      const [payResult, setPayResult] = useState(null) // 결제 결과 { status, message }
 
       // 로그아웃: 토큰 제거 + 상태 초기화 + 상품 화면으로 복귀
       const handleLogout = useCallback(() => {
@@ -1065,6 +1253,51 @@
 
       // 인증 실패(401) 시 자동 로그아웃되는 fetch 래퍼 (user 변동과 무관하게 고정)
       const apiFetch = useMemo(() => createApiFetch(handleLogout), [handleLogout])
+
+      // 🧾 토스 결제창에서 돌아온 리다이렉트 처리 (앱 마운트 시 1회)
+      // 성공: ?payment=success&paymentKey=...&orderId=...&amount=...
+      // 실패: ?payment=fail&message=...
+      useEffect(() => {
+        const params = new URLSearchParams(window.location.search)
+        const payment = params.get('payment')
+        if (!payment) return
+
+        // 쿼리스트링은 처리 후 주소창에서 제거 (새로고침 시 재실행 방지)
+        const clearUrl = () => window.history.replaceState({}, '', window.location.pathname)
+
+        if (payment === 'fail') {
+          setPayResult({ status: 'fail', message: params.get('message') || '결제가 취소되었어요' })
+          clearUrl()
+          return
+        }
+
+        if (payment === 'success') {
+          const paymentKey = params.get('paymentKey')
+          const orderId = params.get('orderId')
+          const amount = Number(params.get('amount'))
+          clearUrl()
+
+          // 서버에 최종 승인 요청 (여기서 실제 결제가 확정됨)
+          setPayResult({ status: 'confirming' })
+          apiFetch(`${API_BASE_URL}/orders/confirm`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paymentKey, orderId, amount }),
+          })
+            .then(async (res) => {
+              const data = await res.json().catch(() => ({}))
+              if (!res.ok) throw new Error(data.error || `승인 실패 (${res.status})`)
+              return data
+            })
+            .then((data) => {
+              setPayResult({ status: 'success', message: `${data.orderName || ''} · ${formatWon(data.amount)}` })
+              setCartCount(0) // 결제 완료 → 장바구니 비워짐
+            })
+            .catch((err) => {
+              setPayResult({ status: 'fail', message: err.message || '결제 승인 중 오류가 발생했어요' })
+            })
+        }
+      }, [apiFetch])
 
       // 토큰 유무로 실제 로그인 판단 (user 정보만 있고 토큰 없는 경우 방지)
       const hasToken = !!authStore.getToken()
@@ -1124,12 +1357,25 @@
             onGoHome={() => setView('products')}
           />
 
-          {/* 본문: 로그인 상태 + 현재 뷰에 따라 분기 */}
-          {view === 'cart' && isLoggedIn ? (
+          {/* 본문: 결제결과 > 결제 > 장바구니 > 상품목록 순으로 분기 */}
+          {payResult ? (
+            <PaymentResultView
+              status={payResult.status}
+              message={payResult.message}
+              onGoHome={() => { setPayResult(null); setOrder(null); setView('products') }}
+            />
+          ) : view === 'payment' && isLoggedIn && order ? (
+            <PaymentView
+              order={order}
+              user={user}
+              onBack={() => setView('cart')}
+            />
+          ) : view === 'cart' && isLoggedIn ? (
             <CartView
               apiFetch={apiFetch}
               onBack={() => setView('products')}
               onCartChange={setCartCount}
+              onProceedToPayment={(o) => { setOrder(o); setView('payment') }}
             />
           ) : (
             <ProductListView

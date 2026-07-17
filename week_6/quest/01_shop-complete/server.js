@@ -335,6 +335,41 @@ async function initDB() {
     )
   `)
 
+  // 주문 테이블 (한 번의 결제 = 한 행)
+  // order_uid: 토스에 넘길 고유 주문번호(문자열). status: pending → paid/failed
+  // total_price: 서버가 DB 상품가로 계산해 확정한 금액 (클라이언트 금액 불신뢰)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS harbor_w6_shop_orders (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES harbor_w5_shop_users(id),
+      order_uid TEXT UNIQUE NOT NULL,
+      total_price INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      payment_key TEXT,
+      order_name TEXT NOT NULL DEFAULT '',
+      paid_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+
+  // 위 테이블이 (practice 등에서) 이미 만들어져 있으면 CREATE IF NOT EXISTS 가 그냥 넘어가므로,
+  // 우리 코드가 쓰는 컬럼이 없을 수 있다 → 없으면 추가해 스키마를 맞춘다 (idempotent).
+  await pool.query(`ALTER TABLE harbor_w6_shop_orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ`)
+  await pool.query(`ALTER TABLE harbor_w6_shop_orders ADD COLUMN IF NOT EXISTS payment_key TEXT`)
+  await pool.query(`ALTER TABLE harbor_w6_shop_orders ADD COLUMN IF NOT EXISTS order_name TEXT NOT NULL DEFAULT ''`)
+
+  // 주문 항목 테이블 (주문 1건에 상품 여러 개)
+  // price: 결제 시점의 단가 스냅샷 (나중에 상품가가 바뀌어도 주문 기록은 그대로 유지)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS harbor_w6_shop_order_items (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER NOT NULL REFERENCES harbor_w6_shop_orders(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES harbor_w5_shop_products(id),
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      price INTEGER NOT NULL
+    )
+  `)
+
   // 상품이 0건이면 중고 전자기기 시드 10종 입력 (최초 1회만)
   const countResult = await pool.query('SELECT count(*) AS cnt FROM harbor_w5_shop_products')
   const count = Number(countResult.rows[0].cnt)
@@ -524,6 +559,163 @@ async function fetchCart(userId) {
 }
 
 // ========================================
+// 💳 주문/결제 헬퍼
+// ========================================
+
+// POST /api/orders — 현재 장바구니로 pending 주문을 만든다.
+// ★ 핵심: 금액을 클라이언트가 못 정하게, 서버가 DB 상품가로 다시 계산해 확정한다.
+async function handleCreateOrder(req, res, authUser) {
+  const userId = authUser.sub
+
+  // 1) 내 장바구니를 서버에서 직접 조회 (금액도 여기서 DB가로 계산됨)
+  const cart = await fetchCart(userId)
+  if (cart.items.length === 0) {
+    sendJson(res, 400, { error: '장바구니가 비어 있습니다' })
+    return
+  }
+
+  const totalPrice = cart.total
+  // 주문명: "맥북에어 외 2건" 형태로 첫 상품명 + 나머지 개수
+  const first = cart.items[0].name
+  const orderName = cart.items.length > 1 ? `${first} 외 ${cart.items.length - 1}건` : first
+
+  // 2) 토스에 넘길 고유 주문번호(order_uid) 생성 — 예측 어렵게 랜덤 + 시각 조합
+  //    crypto.randomUUID 로 충돌 없는 문자열을 만든다.
+  const orderUid = `order_${crypto.randomUUID()}`
+
+  // 3) 주문(pending) + 주문항목 저장. 하나라도 실패하면 함께 롤백되도록 트랜잭션 사용.
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+
+    const orderResult = await client.query(
+      `INSERT INTO harbor_w6_shop_orders (user_id, order_uid, total_price, status, order_name)
+       VALUES ($1, $2, $3, 'pending', $4)
+       RETURNING id`,
+      [userId, orderUid, totalPrice, orderName]
+    )
+    const orderId = orderResult.rows[0].id
+
+    // 장바구니의 각 상품을 주문 항목으로 복사 (price 는 결제시점 단가 스냅샷)
+    for (const item of cart.items) {
+      await client.query(
+        `INSERT INTO harbor_w6_shop_order_items (order_id, product_id, quantity, price)
+         VALUES ($1, $2, $3, $4)`,
+        [orderId, item.product_id, item.quantity, item.price]
+      )
+    }
+
+    await client.query('COMMIT')
+
+    // 4) 프론트가 토스 위젯에 넘길 정보만 반환 (금액은 서버가 확정한 값)
+    sendJson(res, 201, {
+      orderId: orderUid,   // 토스 위젯의 orderId 로 사용
+      amount: totalPrice,  // 서버가 확정한 결제 금액
+      orderName,
+    })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+// POST /api/orders/confirm { paymentKey, orderId, amount }
+// 토스 결제창 성공 후 프론트가 넘겨준 값으로 "최종 승인"을 서버가 처리한다.
+// ★ 핵심 1: 금액을 반드시 서버 주문 금액과 대조 (클라이언트가 보낸 amount 불신뢰)
+// ★ 핵심 2: 승인 호출은 서버가 시크릿키로 (SECRET KEY 는 절대 프론트 노출 금지)
+async function handleConfirmPayment(req, res, authUser) {
+  let body
+  try {
+    body = await parseBody(req)
+  } catch {
+    sendJson(res, 400, { error: '잘못된 JSON 형식입니다' })
+    return
+  }
+
+  const paymentKey = typeof body.paymentKey === 'string' ? body.paymentKey : ''
+  const orderUid = typeof body.orderId === 'string' ? body.orderId : ''  // 토스 orderId = 우리 order_uid
+  const amount = Number(body.amount)
+
+  if (!paymentKey || !orderUid || !Number.isInteger(amount)) {
+    sendJson(res, 400, { error: 'paymentKey, orderId, amount 가 필요합니다' })
+    return
+  }
+
+  // 1) 주문 조회 — 본인 소유 + pending 상태여야 함
+  const orderResult = await pool.query(
+    'SELECT id, total_price, status FROM harbor_w6_shop_orders WHERE order_uid = $1 AND user_id = $2',
+    [orderUid, authUser.sub]
+  )
+  const order = orderResult.rows[0]
+  if (!order) {
+    sendJson(res, 404, { error: '주문을 찾을 수 없습니다' })
+    return
+  }
+  if (order.status === 'completed') {
+    sendJson(res, 409, { error: '이미 결제 완료된 주문입니다' })
+    return
+  }
+
+  // 2) ★ 금액 검증 — 요청 금액이 서버가 저장해둔 주문 금액과 정확히 일치해야 한다
+  if (amount !== order.total_price) {
+    sendJson(res, 400, { error: '결제 금액이 주문 금액과 일치하지 않습니다' })
+    return
+  }
+
+  // 3) ★ 토스에 최종 승인 요청 — 시크릿키로 Basic 인증 (서버만 가능)
+  const secretKey = process.env.TOSS_SECRET_KEY
+  if (!secretKey) {
+    console.error('TOSS_SECRET_KEY 환경변수가 없습니다')
+    sendJson(res, 500, { error: '서버 결제 설정 오류' })
+    return
+  }
+  const auth = Buffer.from(secretKey + ':').toString('base64')
+  const tossResp = await fetch('https://api.tosspayments.com/v1/payments/confirm', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ paymentKey, orderId: orderUid, amount }),
+  })
+  const tossData = await tossResp.json()
+
+  if (!tossResp.ok) {
+    // 토스 승인 실패 → 주문을 failed 로 표시하고 에러 반환
+    await pool.query(
+      "UPDATE harbor_w6_shop_orders SET status = 'failed' WHERE id = $1",
+      [order.id]
+    )
+    console.error('토스 승인 실패:', tossData)
+    sendJson(res, 402, { error: tossData.message || '결제 승인에 실패했습니다' })
+    return
+  }
+
+  // 4) 승인 성공 → 주문 paid 처리 + 결제키/시각 저장, 그리고 장바구니 비우기
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // status 는 기존 테이블 제약(pending/completed/failed/cancelled)에 맞춰 'completed' 사용
+    await client.query(
+      "UPDATE harbor_w6_shop_orders SET status = 'completed', payment_key = $1, paid_at = now() WHERE id = $2",
+      [paymentKey, order.id]
+    )
+    // 결제 완료됐으니 장바구니 비우기
+    await client.query('DELETE FROM harbor_w5_shop_cart WHERE user_id = $1', [authUser.sub])
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
+
+  sendJson(res, 200, { ok: true, orderId: orderUid, amount, orderName: tossData.orderName })
+}
+
+// ========================================
 // 🧭 라우팅
 // ========================================
 async function handleRequest(req, res) {
@@ -558,6 +750,30 @@ async function handleRequest(req, res) {
   }
   if (method === 'POST' && pathname === '/api/auth/login') {
     await handleLogin(req, res)
+    return
+  }
+
+  // ---- 주문/결제 API: 모두 인증 필요 ----
+  if (pathname === '/api/orders' || pathname.startsWith('/api/orders/')) {
+    const authUser = getAuthUser(req)
+    if (!authUser) {
+      sendJson(res, 401, { error: '로그인이 필요합니다' })
+      return
+    }
+
+    // POST /api/orders -> 현재 장바구니로 pending 주문 생성 (금액은 서버가 확정)
+    if (method === 'POST' && pathname === '/api/orders') {
+      await handleCreateOrder(req, res, authUser)
+      return
+    }
+
+    // POST /api/orders/confirm -> 토스 결제 최종 승인 (서버가 시크릿키로 처리)
+    if (method === 'POST' && pathname === '/api/orders/confirm') {
+      await handleConfirmPayment(req, res, authUser)
+      return
+    }
+
+    sendJson(res, 404, { error: '요청한 경로를 찾을 수 없습니다' })
     return
   }
 
