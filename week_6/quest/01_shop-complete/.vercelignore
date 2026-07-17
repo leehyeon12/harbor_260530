@@ -1,0 +1,7 @@
+# 배포에 불필요한 것 제외
+screenshots/
+node_modules
+.env
+.env.local
+.env*.local
+README.md
