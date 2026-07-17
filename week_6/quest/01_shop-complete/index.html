@@ -1021,7 +1021,7 @@
     // ========================================
     // 🧩 헤더 (마켓 이름 + 로그인 상태 + 장바구니)
     // ========================================
-    function Header({ user, cartCount, onOpenCart, onOpenLogin, onLogout, onGoHome }) {
+    function Header({ user, cartCount, onOpenCart, onOpenLogin, onLogout, onGoHome, onOpenMyPage }) {
       return (
         <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-100 shadow-sm">
           <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between gap-3">
@@ -1038,9 +1038,13 @@
             <div className="flex items-center gap-2">
               {user ? (
                 <>
-                  <span className="hidden sm:inline text-sm text-slate-500">
+                  {/* 사용자 이름 클릭 → 마이페이지 (주문 내역) */}
+                  <button
+                    onClick={onOpenMyPage}
+                    className="hidden sm:inline text-sm text-slate-500 hover:text-indigo-600 transition-colors"
+                  >
                     <span className="font-semibold text-slate-700">{user.username}</span>님
-                  </span>
+                  </button>
 
                   {/* 장바구니 아이콘 + 개수 배지 */}
                   <button
@@ -1184,6 +1188,106 @@
               </Button>
             </div>
           </Card>
+        </main>
+      )
+    }
+
+    // ========================================
+    // 👤 마이페이지 (내 주문 내역)
+    // ========================================
+    function MyPageView({ user, apiFetch, onBack }) {
+      const [orders, setOrders] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)
+
+      const loadOrders = useCallback(() => {
+        setLoading(true)
+        setError(null)
+        apiFetch(`${API_BASE_URL}/orders`)
+          .then((res) => {
+            if (!res.ok) throw new Error(`서버 응답 오류 (${res.status})`)
+            return res.json()
+          })
+          .then((data) => setOrders(Array.isArray(data) ? data : []))
+          .catch((err) => setError(err.message || '알 수 없는 오류'))
+          .finally(() => setLoading(false))
+      }, [apiFetch])
+
+      useEffect(() => { loadOrders() }, [loadOrders])
+
+      // 주문일 포맷: "2026. 7. 17. 19:31"
+      const formatDate = (iso) => {
+        if (!iso) return ''
+        const d = new Date(iso)
+        return d.toLocaleString('ko-KR', {
+          year: 'numeric', month: 'long', day: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        })
+      }
+
+      return (
+        <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
+          <div className="flex items-center gap-3 mb-5">
+            <button
+              onClick={onBack}
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold text-slate-600
+                bg-white shadow hover:bg-slate-50 transition-colors"
+            >
+              ← 계속 쇼핑하기
+            </button>
+            <h1 className="text-xl font-bold tracking-tight text-slate-800">
+              {user.username}님의 주문 내역
+            </h1>
+          </div>
+
+          {loading && <LoadingState label="주문 내역을 불러오는 중..." />}
+
+          {!loading && error && <ErrorState message={error} onRetry={loadOrders} />}
+
+          {!loading && !error && orders.length === 0 && (
+            <Card className="p-10 flex flex-col items-center gap-3 text-slate-400">
+              <div className="text-4xl">🧾</div>
+              <p className="text-sm">아직 주문 내역이 없어요</p>
+            </Card>
+          )}
+
+          {!loading && !error && orders.length > 0 && (
+            <div className="flex flex-col gap-4">
+              {orders.map((order) => (
+                <Card key={order.order_uid} className="p-5">
+                  {/* 주문 헤더: 주문일 + 주문번호 */}
+                  <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                    <span className="text-sm font-semibold text-slate-700">
+                      {formatDate(order.paid_at)}
+                    </span>
+                    <span className="text-xs text-slate-400 break-all">
+                      주문번호 {order.order_uid}
+                    </span>
+                  </div>
+
+                  {/* 상품 항목들 */}
+                  <ul className="py-3 flex flex-col gap-1.5">
+                    {order.items.map((it, i) => (
+                      <li key={i} className="flex items-center justify-between text-sm">
+                        <span className="text-slate-600">
+                          {it.product_name} <span className="text-slate-400">× {it.quantity}</span>
+                        </span>
+                        <span className="text-slate-500">{formatWon(it.price * it.quantity)}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  {/* 합계 */}
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                    <span className="text-xs text-slate-400">결제 금액</span>
+                    <span className="text-lg font-bold text-indigo-600">
+                      {formatWon(order.total_price)}
+                    </span>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
         </main>
       )
     }
@@ -1355,6 +1459,7 @@
             onOpenLogin={() => setAuthOpen(true)}
             onLogout={handleLogout}
             onGoHome={() => setView('products')}
+            onOpenMyPage={() => setView('mypage')}
           />
 
           {/* 본문: 결제결과 > 결제 > 장바구니 > 상품목록 순으로 분기 */}
@@ -1369,6 +1474,12 @@
               order={order}
               user={user}
               onBack={() => setView('cart')}
+            />
+          ) : view === 'mypage' && isLoggedIn ? (
+            <MyPageView
+              user={user}
+              apiFetch={apiFetch}
+              onBack={() => setView('products')}
             />
           ) : view === 'cart' && isLoggedIn ? (
             <CartView

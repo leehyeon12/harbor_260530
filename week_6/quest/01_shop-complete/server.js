@@ -715,6 +715,55 @@ async function handleConfirmPayment(req, res, authUser) {
   sendJson(res, 200, { ok: true, orderId: orderUid, amount, orderName: tossData.orderName })
 }
 
+// GET /api/orders — 내 주문 내역 (완료된 주문만, 최신순 + 각 주문의 상품 항목)
+// ★ 본인 것만: WHERE o.user_id = $1 로 사용자별 격리 (장바구니와 같은 패턴)
+async function handleGetOrders(req, res, authUser) {
+  // 1) 내 완료 주문들
+  const ordersResult = await pool.query(
+    `SELECT id, order_uid, total_price, order_name, paid_at
+     FROM harbor_w6_shop_orders
+     WHERE user_id = $1 AND status = 'completed'
+     ORDER BY paid_at DESC`,
+    [authUser.sub]
+  )
+  const orders = ordersResult.rows
+  if (orders.length === 0) {
+    sendJson(res, 200, [])
+    return
+  }
+
+  // 2) 이 주문들의 항목을 한 번에 조회 (상품명 조인)
+  const orderIds = orders.map((o) => o.id)
+  const itemsResult = await pool.query(
+    `SELECT oi.order_id, oi.quantity, oi.price, p.name AS product_name
+     FROM harbor_w6_shop_order_items oi
+     JOIN harbor_w5_shop_products p ON p.id = oi.product_id
+     WHERE oi.order_id = ANY($1)
+     ORDER BY oi.id`,
+    [orderIds]
+  )
+
+  // 3) 주문별로 항목을 묶어서 반환
+  const itemsByOrder = {}
+  for (const it of itemsResult.rows) {
+    if (!itemsByOrder[it.order_id]) itemsByOrder[it.order_id] = []
+    itemsByOrder[it.order_id].push({
+      product_name: it.product_name,
+      quantity: it.quantity,
+      price: it.price,
+    })
+  }
+
+  const result = orders.map((o) => ({
+    order_uid: o.order_uid,     // 주문번호
+    order_name: o.order_name,
+    total_price: o.total_price, // 금액
+    paid_at: o.paid_at,         // 주문일
+    items: itemsByOrder[o.id] || [],
+  }))
+  sendJson(res, 200, result)
+}
+
 // ========================================
 // 🧭 라우팅
 // ========================================
@@ -758,6 +807,12 @@ async function handleRequest(req, res) {
     const authUser = getAuthUser(req)
     if (!authUser) {
       sendJson(res, 401, { error: '로그인이 필요합니다' })
+      return
+    }
+
+    // GET /api/orders -> 내 주문 내역 (마이페이지)
+    if (method === 'GET' && pathname === '/api/orders') {
+      await handleGetOrders(req, res, authUser)
       return
     }
 
