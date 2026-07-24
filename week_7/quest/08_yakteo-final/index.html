@@ -1,0 +1,1839 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>신규 개원 의원 지도 (2026)</title>
+
+  <!-- ⚠️ 모든 CDN은 버전을 명시적으로 고정한다. (미고정 시 메이저 버전이 올라가 깨질 수 있음) -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.9/babel.min.js"></script>
+  <!-- proj4: TM 중부원점(EPSG:5174) → WGS84 위경도 변환용 -->
+  <script src="https://cdn.jsdelivr.net/npm/proj4@2.11.0/dist/proj4.js"></script>
+  <!-- Supabase Auth (카카오 로그인) — DB 쿼리는 서버(/api/favorites)가 담당, 클라는 Auth만 사용 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+
+  <style>
+    /* 지도가 화면을 꽉 채우도록 */
+    html, body, #root { height: 100%; margin: 0; }
+    /* 커스텀 오버레이(인포창) 꼬리 삼각형 */
+    .ovl-wrap { position: relative; }
+    .ovl-arrow {
+      position: absolute; left: 50%; bottom: -9px; transform: translateX(-50%);
+      width: 0; height: 0;
+      border-left: 9px solid transparent; border-right: 9px solid transparent;
+      border-top: 9px solid #ffffff;
+      filter: drop-shadow(0 2px 1px rgba(0,0,0,0.12));
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ========================================
+    // React 훅 구조분해
+    // ========================================
+    const { useState, useEffect, useRef, useMemo, useCallback } = React
+
+    // ========================================
+    // 상수 / 설정
+    // ========================================
+    // ↓↓↓ 여기에만 카카오 JavaScript 키를 입력하면 됩니다 ↓↓↓
+    const KAKAO_JS_KEY = '3f6bba84a45e001f7856864131a1a31a' // ← 카카오 JavaScript 키 (도메인 제한으로 보호됨)
+
+    // 📡 공공데이터 호출은 이제 server.js 프록시(/api/clinics)가 담당한다.
+    //    serviceKey·페이지네이션은 서버 뒤(.env)에 있고 클라이언트에는 노출되지 않는다.
+
+    // 서울 시청 근처(지도 초기 중심)
+    const SEOUL_CENTER = { lat: 37.5665, lng: 126.9780 }
+
+    // EPSG:5174 (한국 TM 중부원점, bessel) 정의
+    const EPSG5174 =
+      '+proj=tmerc +lat_0=38 +lon_0=127.0028902777778 +k=1 +x_0=200000 +y_0=500000 ' +
+      '+ellps=bessel +towgs84=-115.8,474.99,674.11,1.16,-2.31,-1.63,6.43 +units=m +no_defs'
+
+    // proj4에 좌표계 등록
+    proj4.defs('EPSG:5174', EPSG5174)
+
+    // TM(x,y) → WGS84 위경도 변환. 반환: { lat, lng } 또는 null
+    function tmToWgs84(x, y) {
+      if (x == null || y == null) return null
+      try {
+        const [lng, lat] = proj4('EPSG:5174', 'EPSG:4326', [x, y])
+        if (!isFinite(lat) || !isFinite(lng)) return null
+        return { lat, lng }
+      } catch (e) {
+        return null
+      }
+    }
+
+    // 약국 입지 관점에서 처방이 많은(중요한) 진료과 빠른 필터 칩
+    const QUICK_SUBJECTS = ['내과', '소아청소년과', '이비인후과', '정형외과', '피부과', '정신건강의학과', '안과', '가정의학과']
+
+    // ========================================
+    // 💊 진료과목별 처방 가중치 (색상 분류)
+    // ========================================
+    // 약국 매출은 처방전 수에 비례 → 진료과로 처방 기대도를 3단계로 분류한다.
+    // 한 의원이 여러 과를 가지면 "가장 높은 가중치"를 그 의원 등급으로 사용(고>중>저).
+    // - dot/badge : Tailwind 색 클래스(리스트·범례용)
+    // - marker    : 카카오 핀 마커 색(키 있을 때)
+    // - bucket    : 등급 필터에서 묶이는 버킷(미분류 etc 는 중처방 버킷으로 합류)
+    const RX_GRADES = {
+      high: { key: 'high', bucket: 'high', weight: 3, label: '고처방',
+              dot: 'bg-red-500',    badge: 'bg-red-100 text-red-700 border border-red-200',       marker: '#ef4444' },
+      mid:  { key: 'mid',  bucket: 'mid',  weight: 2, label: '중처방',
+              dot: 'bg-amber-500',  badge: 'bg-amber-100 text-amber-700 border border-amber-200', marker: '#f59e0b' },
+      low:  { key: 'low',  bucket: 'low',  weight: 1, label: '저처방',
+              dot: 'bg-slate-400',  badge: 'bg-slate-100 text-slate-600 border border-slate-200', marker: '#94a3b8' },
+      // 미분류: 가중치는 중처방과 동일(2)하게 두되, 회색 톤으로 구분 표시
+      etc:  { key: 'etc',  bucket: 'mid',  weight: 2, label: '미분류',
+              dot: 'bg-gray-400',   badge: 'bg-gray-100 text-gray-500 border border-gray-200',    marker: '#9ca3af' },
+    }
+
+    // 등급 판정 키워드 (진료과 토큰 문자열에 포함되는지로 판정)
+    const RX_KEYWORDS = {
+      high: ['내과', '소아청소년과', '소아과', '이비인후과', '가정의학과', '정신건강의학과', '신경과'],
+      mid:  ['정형외과', '안과', '비뇨의학과', '비뇨기과', '외과', '신경외과', '재활의학과', '산부인과'],
+      low:  ['성형외과', '피부과', '마취통증의학과', '영상의학과', '진단검사'],
+    }
+
+    // 단일 진료과 토큰 → 등급 키('high'|'mid'|'low'|null)
+    // ⚠️ "성형외과"는 중처방 키워드 "외과"도 부분 포함하므로,
+    //    가장 긴(구체적인) 키워드가 이기도록 해서 오분류를 막는다.
+    function gradeOfSpecialty(token) {
+      let best = null // { grade, len }
+      ;['high', 'mid', 'low'].forEach((grade) => {
+        RX_KEYWORDS[grade].forEach((kw) => {
+          if (token.includes(kw) && (!best || kw.length > best.len)) {
+            best = { grade, len: kw.length }
+          }
+        })
+      })
+      return best ? best.grade : null
+    }
+
+    // subject 전체 문자열 → 의원 등급 키('high'|'mid'|'low'|'etc')
+    // 콤마/슬래시/가운뎃점/공백으로 과를 나눠 각각 판정 후 가장 높은 가중치 채택.
+    function getRxGrade(subject) {
+      const tokens = String(subject || '').split(/[,/·]|\s+/).map((t) => t.trim()).filter(Boolean)
+      let best = null     // 등급 키
+      let matched = false
+      tokens.forEach((t) => {
+        const g = gradeOfSpecialty(t)
+        if (g) {
+          matched = true
+          if (!best || RX_GRADES[g].weight > RX_GRADES[best].weight) best = g
+        }
+      })
+      return matched ? best : 'etc' // 어떤 키워드도 안 걸리면 미분류(중처방·회색)
+    }
+
+    // ========================================
+    // ⭐ 즐겨찾기 저장소 (어댑터로 분리)
+    // ========================================
+    // React 쪽은 이 인터페이스(list/add/remove/has — 전부 동기)에만 의존한다.
+    // 구현체: 서버(/api/favorites → Supabase Postgres) + 메모리 캐시.
+    //  - 로그인 시 syncFromServer()로 캐시를 채우고, 이후 has/list 는 캐시에서 동기 응답
+    //    (지도 오버레이 등 비-React 코드가 동기로 호출하기 때문)
+    //  - add/remove 는 캐시 즉시 반영(optimistic) 후 서버에 비동기 반영
+    //  - 비로그인: 캐시 비움 — 즐겨찾기는 로그인 사용자만 (localStorage 마이그레이션 없음 · DEV.md 확정)
+    const favoritesStore = {
+      _cache: [],
+      _token: null,
+      setAuth(token) {
+        this._token = token || null
+        if (!this._token) this._cache = []
+      },
+      _headers(json) {
+        const h = { Authorization: 'Bearer ' + this._token }
+        if (json) h['Content-Type'] = 'application/json'
+        return h
+      },
+      // 서버 → 캐시 동기화 (로그인/새로고침 시 1회)
+      async syncFromServer() {
+        if (!this._token) { this._cache = []; return this._cache }
+        try {
+          const r = await fetch('/api/favorites', { headers: this._headers() })
+          if (r.ok) {
+            const data = await r.json()
+            this._cache = Array.isArray(data.items) ? data.items : []
+          }
+        } catch (e) { console.warn('즐겨찾기 동기화 실패:', e.message) }
+        return this._cache
+      },
+      // 즐겨찾기 객체 배열 반환 — {id,name,addr,subject,openDate,tel,lat,lng,score,scoreDetail}
+      list() { return this._cache },
+      has(id) { return this._cache.some((f) => f.id === id) },
+      add(item) {
+        if (!this._token) return this._cache
+        if (!this._cache.some((f) => f.id === item.id)) {
+          // 저장 시점 스냅샷 — 임장 점수는 조회 시점 데이터라 나중에 재계산하면 달라진다 (DEV.md 확정)
+          const snap = {
+            id: item.id, name: item.name, addr: item.addr,
+            subject: item.subject, openDate: item.openDate, tel: item.tel,
+            lat: item.lat != null ? item.lat : null,
+            lng: item.lng != null ? item.lng : null,
+            score: item.score != null ? item.score : null,
+            scoreDetail: item.sP != null ? { sP: item.sP, sG: item.sG, sD: item.sD, sB: item.sB } : null,
+          }
+          this._cache = [...this._cache, snap] // optimistic
+          fetch('/api/favorites', { method: 'POST', headers: this._headers(true), body: JSON.stringify(snap) })
+            .catch((e) => console.warn('즐겨찾기 저장 실패:', e.message))
+        }
+        return this._cache
+      },
+      remove(id) {
+        if (!this._token) return this._cache
+        this._cache = this._cache.filter((f) => f.id !== id)
+        fetch('/api/favorites?id=' + encodeURIComponent(id), { method: 'DELETE', headers: this._headers() })
+          .catch((e) => console.warn('즐겨찾기 삭제 실패:', e.message))
+        return this._cache
+      },
+    }
+
+    // ========================================
+    // 🗺️ 전국 17개 시/도 + 시군구 (도로명주소 표기 기준)
+    //  - sido: 도로명주소가 시작하는 풀네임 (예: 서울특별시, 경기도)
+    //  - gu  : 표준 행정구역 시군구 목록
+    //  - 세종특별자치시는 단층(시군구 없음) → gu 빈 배열
+    // ========================================
+    const REGIONS = [
+      { sido: '서울특별시', gu: ['종로구', '중구', '용산구', '성동구', '광진구', '동대문구', '중랑구', '성북구', '강북구', '도봉구', '노원구', '은평구', '서대문구', '마포구', '양천구', '강서구', '구로구', '금천구', '영등포구', '동작구', '관악구', '서초구', '강남구', '송파구', '강동구'] },
+      { sido: '부산광역시', gu: ['중구', '서구', '동구', '영도구', '부산진구', '동래구', '남구', '북구', '해운대구', '사하구', '금정구', '강서구', '연제구', '수영구', '사상구', '기장군'] },
+      { sido: '대구광역시', gu: ['중구', '동구', '서구', '남구', '북구', '수성구', '달서구', '달성군', '군위군'] },
+      { sido: '인천광역시', gu: ['중구', '동구', '미추홀구', '연수구', '남동구', '부평구', '계양구', '서구', '강화군', '옹진군'] },
+      { sido: '광주광역시', gu: ['동구', '서구', '남구', '북구', '광산구'] },
+      { sido: '대전광역시', gu: ['동구', '중구', '서구', '유성구', '대덕구'] },
+      { sido: '울산광역시', gu: ['중구', '남구', '동구', '북구', '울주군'] },
+      { sido: '세종특별자치시', gu: [] },
+      { sido: '경기도', gu: ['수원시', '성남시', '의정부시', '안양시', '부천시', '광명시', '평택시', '동두천시', '안산시', '고양시', '과천시', '구리시', '남양주시', '오산시', '시흥시', '군포시', '의왕시', '하남시', '용인시', '파주시', '이천시', '안성시', '김포시', '화성시', '광주시', '양주시', '포천시', '여주시', '연천군', '가평군', '양평군'] },
+      { sido: '강원특별자치도', gu: ['춘천시', '원주시', '강릉시', '동해시', '태백시', '속초시', '삼척시', '홍천군', '횡성군', '영월군', '평창군', '정선군', '철원군', '화천군', '양구군', '인제군', '고성군', '양양군'] },
+      { sido: '충청북도', gu: ['청주시', '충주시', '제천시', '보은군', '옥천군', '영동군', '증평군', '진천군', '괴산군', '음성군', '단양군'] },
+      { sido: '충청남도', gu: ['천안시', '공주시', '보령시', '아산시', '서산시', '논산시', '계룡시', '당진시', '금산군', '부여군', '서천군', '청양군', '홍성군', '예산군', '태안군'] },
+      { sido: '전북특별자치도', gu: ['전주시', '군산시', '익산시', '정읍시', '남원시', '김제시', '완주군', '진안군', '무주군', '장수군', '임실군', '순창군', '고창군', '부안군'] },
+      { sido: '전라남도', gu: ['목포시', '여수시', '순천시', '나주시', '광양시', '담양군', '곡성군', '구례군', '고흥군', '보성군', '화순군', '장흥군', '강진군', '해남군', '영암군', '무안군', '함평군', '영광군', '장성군', '완도군', '진도군', '신안군'] },
+      { sido: '경상북도', gu: ['포항시', '경주시', '김천시', '안동시', '구미시', '영주시', '영천시', '상주시', '문경시', '경산시', '의성군', '청송군', '영양군', '영덕군', '청도군', '고령군', '성주군', '칠곡군', '예천군', '봉화군', '울진군', '울릉군'] },
+      { sido: '경상남도', gu: ['창원시', '진주시', '통영시', '사천시', '김해시', '밀양시', '거제시', '양산시', '의령군', '함안군', '창녕군', '고성군', '남해군', '하동군', '산청군', '함양군', '거창군', '합천군'] },
+      { sido: '제주특별자치도', gu: ['제주시', '서귀포시'] },
+    ]
+
+    // ========================================
+    // 📡 데이터 호출 — server.js 프록시(/api/clinics)
+    // ========================================
+    // serviceKey·고정조건·페이지네이션은 모두 서버가 처리한다.
+    // 서버 응답: { items: [...원본 item 배열...], totalCount: N }
+    // (원본 필드 BPLC_NM/ROAD_NM_ADDR/MDEXM_SBJCT_CN_NM/... 를 그대로 유지하므로
+    //  아래 mapClinics 매핑 로직은 변경 없이 그대로 동작한다.)
+    async function fetchAllClinics(regionLike, sinceMonths, signal) {
+      const res = await fetch(
+        '/api/clinics?region=' + encodeURIComponent(regionLike) + '&since=' + encodeURIComponent(sinceMonths),
+        { signal }
+      )
+      if (!res.ok) {
+        // 서버가 내려준 에러 메시지(JSON.error)를 우선 사용
+        let msg = 'API 요청 실패 (' + res.status + ')'
+        try {
+          const errJson = await res.json()
+          if (errJson && errJson.error) msg = errJson.error
+        } catch (e) { /* 본문이 JSON이 아니면 기본 메시지 유지 */ }
+        throw new Error(msg)
+      }
+      const json = await res.json()
+      return { total: Number(json.totalCount ?? 0), items: json.items || [] }
+    }
+
+    // API 원소 → 앱 내부 형태로 매핑 + 좌표 변환
+    // 반환: { mapped: [...], noCoord: N, noCoordItems: [...] }
+    // noCoordItems = 좌표(TM)가 없어 제외된 의원들(주소는 있음) → 이후 주소로 지오코딩해 복구.
+    function mapClinics(items) {
+      let noCoord = 0
+      const mapped = []
+      const noCoordItems = []
+      items.forEach((o) => {
+        const name = o.BPLC_NM
+        const addr = o.ROAD_NM_ADDR
+        const subject = o.MDEXM_SBJCT_CN_NM
+        // 고유 식별자: 관리번호(MNG_NO) 우선, 없으면 병원명+주소 조합으로 폴백
+        const id = (o.MNG_NO != null && o.MNG_NO !== '')
+          ? String(o.MNG_NO)
+          : `${name || ''}|${addr || ''}`
+        const base = {
+          id,
+          name,
+          addr,
+          subject,
+          openDate: o.LCPMT_YMD,
+          tel: o.TELNO,
+          grade: getRxGrade(subject), // 처방 가중치 등급 키('high'|'mid'|'low'|'etc')
+        }
+        const xs = o.CRD_INFO_X, ys = o.CRD_INFO_Y
+        // 좌표(TM)가 빈 문자열/null이면 마커 제외 대상
+        const x = (xs === '' || xs == null) ? null : parseFloat(xs)
+        const y = (ys === '' || ys == null) ? null : parseFloat(ys)
+        const wgs = (x == null || y == null || !isFinite(x) || !isFinite(y)) ? null : tmToWgs84(x, y)
+        if (!wgs) { noCoord++; if (base.addr) noCoordItems.push(base); return }
+        mapped.push({ ...base, lat: wgs.lat, lng: wgs.lng })
+      })
+      return { mapped, noCoord, noCoordItems }
+    }
+
+    // 📍 주소 1건 → WGS84 좌표(Kakao Geocoder). 실패 시 null. (kakao.maps.services 필요)
+    function geocodeAddress(geocoder, addr) {
+      return new Promise((resolve) => {
+        if (!addr) return resolve(null)
+        geocoder.addressSearch(addr, (res, status) => {
+          if (status === window.kakao.maps.services.Status.OK && res && res[0]) {
+            resolve({ lat: parseFloat(res[0].y), lng: parseFloat(res[0].x) })
+          } else resolve(null)
+        })
+      })
+    }
+
+    // 📍 좌표없음 의원들을 주소로 지오코딩해 좌표 부여(동시 4개 제한). 복구분에 approx:true 표시.
+    // kakao SDK(services 포함)가 ready 된 뒤 호출되어야 한다.
+    async function geocodeClinics(items) {
+      const kakao = window.kakao
+      if (!kakao || !kakao.maps || !kakao.maps.services || !items.length) return []
+      const geocoder = new kakao.maps.services.Geocoder()
+      const out = []
+      let i = 0
+      const worker = async () => {
+        while (i < items.length) {
+          const c = items[i++]
+          const wgs = await geocodeAddress(geocoder, c.addr)
+          if (wgs) out.push({ ...c, lat: wgs.lat, lng: wgs.lng, approx: true })
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker))
+      return out
+    }
+
+    // 📡 약국(경쟁 레이어) 조회 — /api/pharmacies. 응답 형태는 의원과 동일.
+    // 약국 활용신청 전이면 서버가 503 + needsApply 로 내려준다(에러 메시지 그대로 노출).
+    async function fetchAllPharmacies(regionLike, signal) {
+      const res = await fetch('/api/pharmacies?region=' + encodeURIComponent(regionLike), { signal })
+      if (!res.ok) {
+        let msg = '약국 API 요청 실패 (' + res.status + ')'
+        try {
+          const errJson = await res.json()
+          if (errJson && errJson.error) msg = errJson.error
+        } catch (e) { /* JSON 아니면 기본 메시지 */ }
+        throw new Error(msg)
+      }
+      const json = await res.json()
+      return { total: Number(json.totalCount ?? 0), items: json.items || [] }
+    }
+
+    // 약국 원소 → 지도 점 형태로 매핑(+ 좌표 변환). 의원보다 단순(등급·진료과 없음).
+    function mapPharmacies(items) {
+      let noCoord = 0
+      const mapped = []
+      items.forEach((o) => {
+        const name = o.BPLC_NM
+        const addr = o.ROAD_NM_ADDR
+        const id = (o.MNG_NO != null && o.MNG_NO !== '')
+          ? String(o.MNG_NO)
+          : `${name || ''}|${addr || ''}`
+        const xs = o.CRD_INFO_X, ys = o.CRD_INFO_Y
+        const x = (xs === '' || xs == null) ? null : parseFloat(xs)
+        const y = (ys === '' || ys == null) ? null : parseFloat(ys)
+        const wgs = (x == null || y == null || !isFinite(x) || !isFinite(y)) ? null : tmToWgs84(x, y)
+        if (!wgs) { noCoord++; return }
+        mapped.push({ id, name, addr, lat: wgs.lat, lng: wgs.lng })
+      })
+      return { mapped, noCoord }
+    }
+
+    // 두 WGS84 좌표 간 거리(m) — Haversine
+    function distMeters(aLat, aLng, bLat, bLng) {
+      const R = 6371000
+      const toRad = (d) => (d * Math.PI) / 180
+      const dLat = toRad(bLat - aLat)
+      const dLng = toRad(bLng - aLng)
+      const s = Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2
+      return 2 * R * Math.asin(Math.sqrt(s))
+    }
+
+    // ⭐ "기회 자리"(약국 공백) 의원 id 집합 — 반경 thresholdM 내 약국이 하나도 없는 신규 의원.
+    //  약국 데이터가 없으면 빈 집합(경쟁 정보가 없으면 기회 판단 불가).
+    function computeOpportunityIds(clinics, pharmacies, thresholdM) {
+      const out = new Set()
+      if (!pharmacies || pharmacies.length === 0) return out
+      const latPad = thresholdM / 111000 + 0.0005 // 위도 1도≈111km — 먼 약국 빠른 스킵용
+      for (const c of clinics) {
+        let near = false
+        for (const p of pharmacies) {
+          if (Math.abs(p.lat - c.lat) > latPad) continue // 위도만으로 명백히 먼 건 스킵
+          if (distMeters(c.lat, c.lng, p.lat, p.lng) <= thresholdM) { near = true; break }
+        }
+        if (!near) out.add(c.id)
+      }
+      return out
+    }
+
+    // 빈 집합(약국 로딩 중 등 기회 판정 미적용 시) — 참조가 고정돼야 불필요한 재렌더를 막는다.
+    const EMPTY_IDS = new Set()
+
+    // 의원 → 가장 가까운 약국까지 거리(m). 약국이 없으면 Infinity. (위도 1.1km 밖은 빠른 스킵)
+    function nearestPharmDist(clinic, pharmacies) {
+      let best = Infinity
+      for (const p of pharmacies) {
+        if (Math.abs(p.lat - clinic.lat) > 0.01) continue
+        const d = distMeters(clinic.lat, clinic.lng, p.lat, p.lng)
+        if (d < best) best = d
+      }
+      return best
+    }
+
+    // 도로명 주소 → 건물 단위 키(상세 동/층/호 제거). 같은 건물 = 메디컬 빌딩 판정용.
+    function buildingKey(addr) {
+      if (!addr) return null
+      return addr.split(',')[0].trim() // "…도산대로 117, 4, 5층" → "…도산대로 117"
+    }
+
+    // 의원 목록 → 건물키별 의원 수 Map. 한 건물에 의원이 여럿이면 메디컬 빌딩.
+    function computeMedicalBuildings(clinics) {
+      const m = new Map()
+      for (const c of clinics) {
+        const k = buildingKey(c.addr)
+        if (!k) continue
+        m.set(k, (m.get(k) || 0) + 1)
+      }
+      return m
+    }
+
+    // 약국 공백 점수(0~3) — 가장 가까운 약국이 멀수록 기회. 처방약국은 "문전"이 핵심이라 거리에 민감.
+    function gapScore(distM) {
+      if (!isFinite(distM)) return 3   // 인근에 약국 자체가 없음 = 최고 공백
+      if (distM >= 200) return 3
+      if (distM >= 150) return 2
+      if (distM >= 100) return 1
+      if (distM >= 50) return 0.5
+      return 0
+    }
+
+    // 🎯 임장 점수 = 처방수요(1~3) + 약국공백(0~3) + 의사규모(0~3) + 메디컬빌딩(0~2). 근거도 분해 반환.
+    //  hasPharm=false(시/도 전체 등 약국데이터 없음)면 공백점수는 0으로 두고 처방·빌딩만 반영.
+    function scoreClinic(c, distM, buildingCount, hasPharm) {
+      const sP = (RX_GRADES[c.grade] || RX_GRADES.etc).weight          // 1~3
+      const sG = hasPharm ? gapScore(distM) : 0                        // 0~3
+      const dr = c.dr || 0
+      const sD = Math.round(Math.min(dr, 10) * 0.3 * 10) / 10          // 0~3 (의사 10명+ 만점)
+      const sB = buildingCount >= 2 ? Math.min((buildingCount - 1) * 0.7, 2) : 0 // 0~2
+      const score = Math.round((sP + sG + sD + sB) * 10) / 10
+      return { score, sP, sG, sD, sB }
+    }
+
+    // 약국 단일 페이지 조회(점진 로딩용) — { items, totalCount, totalPages }
+    async function fetchPharmaciesPage(regionLike, pageNo, signal) {
+      const res = await fetch(
+        '/api/pharmacies?region=' + encodeURIComponent(regionLike) + '&pageNo=' + pageNo,
+        { signal }
+      )
+      if (!res.ok) {
+        let msg = '약국 API 요청 실패 (' + res.status + ')'
+        try {
+          const errJson = await res.json()
+          if (errJson && errJson.error) msg = errJson.error
+        } catch (e) { /* JSON 아니면 기본 메시지 */ }
+        throw new Error(msg)
+      }
+      const json = await res.json()
+      return {
+        items: json.items || [],
+        totalCount: Number(json.totalCount ?? 0),
+        totalPages: Number(json.totalPages ?? 1),
+      }
+    }
+
+    // 의원명 정규화(HIRA 의사수 매칭 키) — 백엔드 normClinicName과 동일 규칙(공백·괄호·'의원' 제거).
+    function normClinicName(s) {
+      return String(s || '').replace(/\s|의원|\(.*?\)/g, '').trim()
+    }
+
+    // HIRA 의사수 맵 조회 — { 정규화명: { drTotCnt, sdrCnt } }. 구 미선택/실패 시 {} (보강은 best-effort).
+    async function fetchDoctorMap(regionLike, signal) {
+      const res = await fetch('/api/clinic-doctors?region=' + encodeURIComponent(regionLike), { signal })
+      if (!res.ok) return {}
+      const json = await res.json()
+      return json.map || {}
+    }
+
+    // ========================================
+    // 🎨 디자인 시스템 컴포넌트 (순수 표현용)
+    // ========================================
+    function Badge({ children, className = '' }) {
+      return (
+        <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${className}`}>
+          {children}
+        </span>
+      )
+    }
+
+    function Chip({ active, onClick, children, className = '' }) {
+      return (
+        <button
+          type="button"
+          onClick={onClick}
+          className={`px-3 py-1.5 rounded-full text-sm border transition whitespace-nowrap
+            ${active
+              ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+              : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'} ${className}`}
+        >
+          {children}
+        </button>
+      )
+    }
+
+    // 처방 가중치 색 뱃지 (등급 점 + 라벨)
+    function RxBadge({ grade, className = '' }) {
+      const g = RX_GRADES[grade] || RX_GRADES.etc
+      return (
+        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${g.badge} ${className}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${g.dot}`} />
+          {g.label}
+        </span>
+      )
+    }
+
+    // 즐겨찾기 별 토글 버튼 (★/☆)
+    function FavStar({ active, onClick, className = '' }) {
+      return (
+        <button
+          type="button"
+          onClick={onClick}
+          aria-pressed={active}
+          aria-label={active ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+          className={`shrink-0 text-xl leading-none transition
+            ${active ? 'text-amber-400' : 'text-gray-300 hover:text-amber-300'} ${className}`}
+        >
+          {active ? '★' : '☆'}
+        </button>
+      )
+    }
+
+    // ========================================
+    // 🧩 카카오 SDK 동적 로더 (clusterer 라이브러리 포함)
+    // ========================================
+    // 반환 상태: 'loading' | 'ready' | 'error'
+    function useKakaoLoader() {
+      const [status, setStatus] = useState('loading')
+
+      useEffect(() => {
+        // 키가 placeholder면 시도 자체를 막고 안내
+        if (!KAKAO_JS_KEY || KAKAO_JS_KEY === 'YOUR_KAKAO_JS_KEY') {
+          setStatus('error')
+          return
+        }
+        // 이미 로드된 경우
+        if (window.kakao && window.kakao.maps) {
+          setStatus('ready')
+          return
+        }
+
+        const script = document.createElement('script')
+        // autoload=false → 로드 후 kakao.maps.load(cb)로 수동 초기화
+        // libraries=clusterer(클러스터) + services(주소→좌표 지오코딩, 좌표없음 의원 복구용)
+        script.src =
+          `//dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false&libraries=clusterer,services`
+        script.async = true
+
+        // 키가 잘못됐거나 도메인 미등록이면 onerror 또는 load 콜백 미호출로 이어짐 → 타임아웃 방어
+        const timer = setTimeout(() => setStatus('error'), 8000)
+
+        script.onload = () => {
+          window.kakao.maps.load(() => {
+            clearTimeout(timer)
+            setStatus('ready')
+          })
+        }
+        script.onerror = () => {
+          clearTimeout(timer)
+          setStatus('error')
+        }
+        document.head.appendChild(script)
+
+        return () => clearTimeout(timer)
+      }, [])
+
+      return status
+    }
+
+    // ========================================
+    // 📄 지도 컴포넌트 (마커 + 클러스터 + 커스텀 오버레이)
+    // ========================================
+    function KakaoMap({ clinics, pharmacies, opportunityIds, kakaoStatus, onSelect, focusClinic, onToggleFav }) {
+      const containerRef = useRef(null)
+      const mapRef = useRef(null)
+      const clustererRef = useRef(null)
+      const overlayRef = useRef(null)       // 현재 떠 있는 커스텀 오버레이
+      const markersByIdRef = useRef({})      // id → { marker, pos, clinic } (카드→마커 포커스용)
+      const markerImgCache = useRef({})      // 등급 key → kakao.maps.MarkerImage (등급별 1회 생성 캐시)
+      const pharmMarkersRef = useRef([])     // 약국 마커(경쟁 레이어) — 클러스터와 분리해 직접 관리
+      const pharmImgCache = useRef(null)     // 약국 점 MarkerImage 1회 생성 캐시
+      const pharmDrawnRef = useRef(0)        // 이미 그린 약국 마커 수(점진 로딩 시 추가분만 렌더)
+      const haloMarkersRef = useRef([])      // 기회 자리 후광 마커 — 핀 뒤에 직접 관리
+      const haloImgCache = useRef(null)      // 후광 MarkerImage 1회 생성 캐시
+
+      // 지도 1회 생성
+      useEffect(() => {
+        if (kakaoStatus !== 'ready' || !containerRef.current || mapRef.current) return
+        const kakao = window.kakao
+        const map = new kakao.maps.Map(containerRef.current, {
+          center: new kakao.maps.LatLng(SEOUL_CENTER.lat, SEOUL_CENTER.lng),
+          level: 8, // 서울 전체가 대략 보이는 줌
+        })
+        mapRef.current = map
+
+        // 클러스터 원 스타일(개수 = 밀집도). 등급 핀 색(빨/주/회)과 혼동되지 않게
+        // 중립 단색(blue) 1색의 농도·크기 차로 구간을 표현. 흰 테두리 + 굵은 흰 글씨로 또렷하게.
+        const clusterBase = {
+          borderRadius: '50%',
+          border: '2px solid #fff',
+          color: '#fff',
+          textAlign: 'center',
+          fontWeight: '700',
+          boxShadow: '0 1px 4px rgba(0,0,0,0.35)',
+        }
+        const clusterStyles = [
+          { ...clusterBase, width: '34px', height: '34px', lineHeight: '34px', fontSize: '12px', background: 'rgba(96,165,250,0.95)' },  // <10  blue-400
+          { ...clusterBase, width: '42px', height: '42px', lineHeight: '42px', fontSize: '13px', background: 'rgba(59,130,246,0.95)' },   // 10~  blue-500
+          { ...clusterBase, width: '52px', height: '52px', lineHeight: '52px', fontSize: '14px', background: 'rgba(37,99,235,0.95)' },    // 50~  blue-600
+          { ...clusterBase, width: '62px', height: '62px', lineHeight: '62px', fontSize: '15px', background: 'rgba(29,78,216,0.96)' },    // 100~ blue-700
+        ]
+
+        clustererRef.current = new kakao.maps.MarkerClusterer({
+          map,
+          averageCenter: true,
+          minLevel: 6, // 이 레벨 이상으로 축소되면 군집화
+          gridSize: 70,
+          styles: clusterStyles,
+          calculator: [10, 50, 100], // 구간 경계 → styles 4단계와 매칭
+        })
+
+        // 지도 빈 곳 클릭 시 오버레이 닫기
+        kakao.maps.event.addListener(map, 'click', () => {
+          if (overlayRef.current) overlayRef.current.setMap(null)
+          onSelect && onSelect(null)
+        })
+      }, [kakaoStatus])
+
+      // 처방 등급별 색상 핀 마커 이미지(SVG data URI). 등급별 1회 생성 후 캐시.
+      const getMarkerImage = useCallback((grade) => {
+        const kakao = window.kakao
+        const g = RX_GRADES[grade] || RX_GRADES.etc
+        if (markerImgCache.current[g.key]) return markerImgCache.current[g.key]
+        const svg =
+          `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="36" viewBox="0 0 26 36">` +
+          `<path d="M13 0C5.8 0 0 5.8 0 13c0 9 13 23 13 23s13-14 13-23C26 5.8 20.2 0 13 0z" fill="${g.marker}"/>` +
+          `<circle cx="13" cy="13" r="5" fill="#fff"/></svg>`
+        const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+        const img = new kakao.maps.MarkerImage(url, new kakao.maps.Size(26, 36), {
+          offset: new kakao.maps.Point(13, 36),
+        })
+        markerImgCache.current[g.key] = img
+        return img
+      }, [])
+
+      // 약국 점 마커 이미지(흐린 청록 원) — 1회 생성 후 캐시. 의원 핀과 시각적으로 구분(배경 역할).
+      const getPharmMarkerImage = useCallback(() => {
+        const kakao = window.kakao
+        if (pharmImgCache.current) return pharmImgCache.current
+        const svg =
+          `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">` +
+          `<circle cx="8" cy="8" r="5.5" fill="#14b8a6" fill-opacity="0.85" stroke="#fff" stroke-width="2"/></svg>`
+        const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+        const img = new kakao.maps.MarkerImage(url, new kakao.maps.Size(16, 16), {
+          offset: new kakao.maps.Point(8, 8),
+        })
+        pharmImgCache.current = img
+        return img
+      }, [])
+
+      // 기회 자리(약국 공백) 후광 이미지(금색 링) — 핀 뒤에 깔아 강조. 1회 생성 후 캐시.
+      const getHaloImage = useCallback(() => {
+        const kakao = window.kakao
+        if (haloImgCache.current) return haloImgCache.current
+        const svg =
+          `<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">` +
+          `<circle cx="22" cy="22" r="18" fill="#f59e0b" fill-opacity="0.22" stroke="#f59e0b" stroke-width="3" stroke-opacity="0.95"/></svg>`
+        const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+        const img = new kakao.maps.MarkerImage(url, new kakao.maps.Size(44, 44), {
+          offset: new kakao.maps.Point(22, 40), // 핀 몸통에 후광이 겹치도록 살짝 위로
+        })
+        haloImgCache.current = img
+        return img
+      }, [])
+
+      // 커스텀 오버레이 HTML 생성 (등급 뱃지 + 즐겨찾기 별 포함)
+      const buildOverlayContent = useCallback((c) => {
+        const g = RX_GRADES[c.grade] || RX_GRADES.etc
+        const fav = favoritesStore.has(c.id) // 진실의 원천은 저장소(어댑터)
+        const wrap = document.createElement('div')
+        wrap.className = 'ovl-wrap'
+        wrap.innerHTML = `
+          <div style="min-width:230px;max-width:290px;background:#fff;border-radius:12px;
+                      box-shadow:0 6px 24px rgba(0,0,0,0.18);overflow:hidden;font-family:inherit;">
+            <div style="display:flex;align-items:center;padding:10px 12px;background:#2563eb;color:#fff;">
+              <strong style="flex:1;font-size:14px;line-height:1.3;margin-right:8px;">${escapeHtml(c.name)}</strong>
+              <span class="ovl-fav" style="cursor:pointer;font-size:18px;line-height:1;
+                        color:${fav ? '#fbbf24' : 'rgba(255,255,255,0.7)'};">${fav ? '★' : '☆'}</span>
+              <span class="ovl-close" style="cursor:pointer;font-size:18px;line-height:1;
+                        padding:0 2px;margin-left:6px;opacity:.9;">&times;</span>
+            </div>
+            <div style="padding:10px 12px;font-size:12.5px;color:#374151;line-height:1.55;">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;">
+                <span style="display:inline-block;width:8px;height:8px;border-radius:9999px;background:${g.marker};"></span>
+                <span style="font-weight:600;color:${g.marker};">${g.label}</span>
+                ${c.subject ? `<span style="color:#2563eb;">· ${escapeHtml(c.subject)}</span>` : ''}
+              </div>
+              ${c.score != null && isFinite(c.nearestDist) ? `<div style="margin-bottom:5px;"><span style="display:inline-block;padding:1px 8px;border-radius:9999px;background:#fef3c7;color:#b45309;font-weight:700;font-size:12px;">🎯 임장 ${c.score}점</span>${c.buildingCount >= 2 ? ` <span style="display:inline-block;padding:1px 7px;border-radius:9999px;background:#f5f3ff;color:#7c3aed;font-size:11px;">🏢 빌딩 ${c.buildingCount}</span>` : ''}</div>` : ''}
+              ${c.dr > 0 ? `<div style="margin-bottom:3px;">🩺 의사 ${c.dr}명${c.dr >= 5 ? ' · 대형' : ''}</div>` : ''}
+              <div style="margin-bottom:3px;">🗓️ 개원 ${escapeHtml(c.openDate || '-')}</div>
+              <div style="margin-bottom:3px;">📍 ${escapeHtml(c.addr || '-')}${c.approx ? ' <span style="color:#d97706;font-size:11px;">· 주소 추정</span>' : ''}</div>
+              <div>☎️ ${c.tel ? escapeHtml(c.tel) : '<span style="color:#9ca3af;">전화 정보 없음</span>'}</div>
+            </div>
+          </div>
+          <div class="ovl-arrow"></div>
+        `
+        const closeBtn = wrap.querySelector('.ovl-close')
+        if (closeBtn) {
+          closeBtn.onclick = () => {
+            if (overlayRef.current) overlayRef.current.setMap(null)
+            onSelect && onSelect(null)
+          }
+        }
+        const favBtn = wrap.querySelector('.ovl-fav')
+        if (favBtn) {
+          favBtn.onclick = () => {
+            onToggleFav && onToggleFav(c)
+            const nowFav = favoritesStore.has(c.id) // 토글 후 저장소 기준으로 즉시 반영
+            favBtn.textContent = nowFav ? '★' : '☆'
+            favBtn.style.color = nowFav ? '#fbbf24' : 'rgba(255,255,255,0.7)'
+          }
+        }
+        return wrap
+      }, [onSelect, onToggleFav])
+
+      // 오버레이 열기(마커 클릭·카드 클릭 공용). fireSelect=true면 선택 상태도 갱신.
+      const openOverlayFor = useCallback((c, pos, fireSelect) => {
+        const kakao = window.kakao
+        const map = mapRef.current
+        if (!map) return
+        if (overlayRef.current) overlayRef.current.setMap(null)
+        const overlay = new kakao.maps.CustomOverlay({
+          position: pos,
+          content: buildOverlayContent(c),
+          yAnchor: 1.16,
+          zIndex: 3,
+        })
+        overlay.setMap(map)
+        overlayRef.current = overlay
+        map.panTo(pos)
+        if (fireSelect) onSelect && onSelect(c)
+      }, [buildOverlayContent, onSelect])
+
+      // clinics 변경 시 마커 다시 그림 (등급 색상 적용 + id로 인덱싱)
+      useEffect(() => {
+        if (kakaoStatus !== 'ready' || !mapRef.current || !clustererRef.current) return
+        const kakao = window.kakao
+        const map = mapRef.current
+        const clusterer = clustererRef.current
+
+        // 기존 마커/오버레이/후광 정리
+        clusterer.clear()
+        if (overlayRef.current) overlayRef.current.setMap(null)
+        haloMarkersRef.current.forEach((m) => m.setMap(null))
+        haloMarkersRef.current = []
+        markersByIdRef.current = {}
+
+        const markers = clinics.map((c) => {
+          const pos = new kakao.maps.LatLng(c.lat, c.lng)
+          const marker = new kakao.maps.Marker({
+            position: pos,
+            title: c.name,
+            image: getMarkerImage(c.grade), // 등급별 색상 핀
+            zIndex: 3, // 전경(약국 점 1 < 후광 2 < 의원 핀 3)
+          })
+          kakao.maps.event.addListener(marker, 'click', () => openOverlayFor(c, pos, true))
+          markersByIdRef.current[c.id] = { marker, pos, clinic: c }
+          return marker
+        })
+
+        clusterer.addMarkers(markers)
+
+        // ⭐ 기회 자리(약국 공백) 의원에 금색 후광을 핀 뒤에 깐다(클러스터와 분리해 직접 관리).
+        if (opportunityIds && opportunityIds.size > 0) {
+          const haloImg = getHaloImage()
+          haloMarkersRef.current = clinics
+            .filter((c) => opportunityIds.has(c.id))
+            .map((c) => {
+              const halo = new kakao.maps.Marker({
+                position: new kakao.maps.LatLng(c.lat, c.lng),
+                image: haloImg,
+                zIndex: 2,
+                clickable: false,
+              })
+              halo.setMap(map)
+              return halo
+            })
+        }
+
+        // 선택 지역 데이터에 맞춰 지도 영역 자동 이동 (마커가 있을 때만)
+        if (markers.length > 0) {
+          const bounds = new kakao.maps.LatLngBounds()
+          clinics.forEach((c) => bounds.extend(new kakao.maps.LatLng(c.lat, c.lng)))
+          map.setBounds(bounds)
+        }
+      }, [clinics, opportunityIds, kakaoStatus, getMarkerImage, getHaloImage, openOverlayFor])
+
+      // 카드 클릭 등으로 focusClinic 이 바뀌면 해당 마커로 이동/오버레이 표시
+      useEffect(() => {
+        if (kakaoStatus !== 'ready' || !mapRef.current || !focusClinic) return
+        const entry = markersByIdRef.current[focusClinic.id]
+        if (!entry) return // 좌표 없는 의원이면 마커가 없을 수 있음 → 무시(리스트만 동작)
+        openOverlayFor(entry.clinic, entry.pos, false)
+      }, [focusClinic, kakaoStatus, openOverlayFor])
+
+      // 약국 마커(경쟁 레이어) — 지도에 직접 그림(클러스터와 분리), 흐린 청록 점.
+      // 의원 핀(전경)보다 아래(zIndex 1)에 깔고, 지도 bounds 계산엔 영향 주지 않는다.
+      useEffect(() => {
+        if (kakaoStatus !== 'ready' || !mapRef.current) return
+        const kakao = window.kakao
+        const map = mapRef.current
+        // 비었거나 줄었으면(지역 변경/토글 OFF) 전부 제거 후 처음부터
+        if (!pharmacies || pharmacies.length < pharmDrawnRef.current) {
+          pharmMarkersRef.current.forEach((m) => m.setMap(null))
+          pharmMarkersRef.current = []
+          pharmDrawnRef.current = 0
+          if (!pharmacies || pharmacies.length === 0) return
+        }
+        // 새로 늘어난 부분만 추가 → 점진 로딩 시 깜빡임 없이 점이 쌓인다.
+        const img = getPharmMarkerImage()
+        for (let i = pharmDrawnRef.current; i < pharmacies.length; i++) {
+          const p = pharmacies[i]
+          const marker = new kakao.maps.Marker({
+            position: new kakao.maps.LatLng(p.lat, p.lng),
+            title: p.name,
+            image: img,
+            zIndex: 1,
+          })
+          marker.setMap(map)
+          pharmMarkersRef.current.push(marker)
+        }
+        pharmDrawnRef.current = pharmacies.length
+      }, [pharmacies, kakaoStatus, getPharmMarkerImage])
+
+      // 키 없음/로드 실패 안내 화면 (빈 회색 화면 방지)
+      if (kakaoStatus === 'error') {
+        return (
+          <div className="h-full w-full flex items-center justify-center bg-gray-100 p-6">
+            <div className="max-w-md text-center">
+              <div className="text-5xl mb-4">🗝️</div>
+              <h2 className="text-lg font-bold text-gray-800 mb-2">카카오 지도를 불러올 수 없습니다</h2>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                <b>카카오 JavaScript 키를 입력하세요.</b><br />
+                <code className="px-1.5 py-0.5 bg-gray-200 rounded text-xs">index.html</code> 상단의{' '}
+                <code className="px-1.5 py-0.5 bg-gray-200 rounded text-xs">KAKAO_JS_KEY</code> 값을
+                실제 키로 바꿔주세요.
+              </p>
+              <p className="text-xs text-gray-500 mt-4 bg-white/70 border border-gray-200 rounded-lg px-3 py-2 leading-relaxed">
+                💡 지도가 없어도 <b>의원 목록 · 처방 가중치 색상 · 즐겨찾기</b>는 모두 정상 동작합니다.<br />
+                옆(또는 아래)의 <b>의원 목록</b>에서 데이터를 확인하고 정렬·필터·별표를 사용해 보세요.
+              </p>
+              <p className="text-xs text-gray-400 mt-3 leading-relaxed">
+                카카오 개발자센터 → 내 애플리케이션 → 앱 키 → JavaScript 키<br />
+                (플랫폼 설정에서 사이트 도메인 등록도 필요)
+              </p>
+            </div>
+          </div>
+        )
+      }
+
+      return (
+        <div className="relative h-full w-full">
+          <div ref={containerRef} className="h-full w-full" />
+          {kakaoStatus === 'loading' && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-50/80">
+              <div className="text-gray-500 text-sm animate-pulse">지도를 불러오는 중…</div>
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    // HTML 이스케이프 (오버레이 innerHTML 주입 방어)
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+    }
+
+    // ========================================
+    // 🔐 Supabase Auth (카카오 로그인)
+    // ========================================
+    // 공개 설정(SUPABASE_URL/ANON_KEY)은 /api/config 로 받아온다
+    // (하드코딩 대신 .env / Vercel 환경변수 한 곳에서 관리).
+    let sbClient = null
+    function useAuth() {
+      const [session, setSession] = useState(null)
+      const [ready, setReady] = useState(false)
+
+      useEffect(() => {
+        let alive = true
+        let sub = null
+        ;(async () => {
+          try {
+            const r = await fetch('/api/config')
+            const cfg = await r.json()
+            if (!cfg.supabaseUrl || !cfg.supabaseAnonKey || !window.supabase) {
+              if (alive) setReady(true)
+              return
+            }
+            sbClient = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey)
+            const { data } = await sbClient.auth.getSession()
+            if (alive) setSession(data.session || null)
+            const res = sbClient.auth.onAuthStateChange((_evt, s) => setSession(s))
+            sub = res.data && res.data.subscription
+          } catch (e) {
+            console.warn('Supabase 초기화 실패(로그인 비활성):', e.message)
+          }
+          if (alive) setReady(true)
+        })()
+        return () => { alive = false; sub && sub.unsubscribe() }
+      }, [])
+
+      const login = useCallback(() => {
+        if (!sbClient) {
+          alert('로그인 설정이 아직 준비되지 않았습니다 (SUPABASE_URL/ANON_KEY 확인)')
+          return
+        }
+        sbClient.auth.signInWithOAuth({ provider: 'kakao', options: { redirectTo: window.location.origin } })
+      }, [])
+      const logout = useCallback(() => { sbClient && sbClient.auth.signOut() }, [])
+
+      return { session, ready, login, logout }
+    }
+
+    // 헤더 우측 로그인 상태 표시/버튼
+    function AuthBar({ session, ready, onLogin, onLogout }) {
+      if (!ready) return null
+      if (!session) {
+        return (
+          <button
+            type="button"
+            onClick={onLogin}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition hover:brightness-95"
+            style={{ background: '#FEE500', color: '#191919' }}
+          >
+            <span aria-hidden>💬</span> 카카오 로그인
+          </button>
+        )
+      }
+      const meta = (session.user && session.user.user_metadata) || {}
+      const name = meta.name || meta.preferred_username || meta.user_name || '약사님'
+      return (
+        <div className="shrink-0 flex items-center gap-2 text-sm">
+          {meta.avatar_url && <img src={meta.avatar_url} alt="" className="w-6 h-6 rounded-full" />}
+          <span className="text-gray-700 font-medium max-w-[8rem] truncate">{name}</span>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="px-2 py-1 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-50"
+          >
+            로그아웃
+          </button>
+        </div>
+      )
+    }
+
+    // ========================================
+    // ⭐ 즐겨찾기 훅 (favoritesStore 어댑터만 호출)
+    // ========================================
+    // 세션이 바뀌면 서버에서 캐시를 동기화하고, toggle 은 비로그인 시 로그인 유도.
+    // toggle 은 useCallback([]) + ref 로 안정화 — KakaoMap 마커 effect 재실행 방지 (기존 보장 유지).
+    function useFavorites(session, onNeedLogin) {
+      const [ids, setIds] = useState([])
+      const sessionRef = useRef(null)
+      const needLoginRef = useRef(null)
+      needLoginRef.current = onNeedLogin
+
+      useEffect(() => {
+        let alive = true
+        sessionRef.current = session
+        favoritesStore.setAuth(session ? session.access_token : null)
+        favoritesStore.syncFromServer().then(() => {
+          if (alive) setIds(favoritesStore.list().map((f) => f.id))
+        })
+        return () => { alive = false }
+      }, [session])
+
+      const has = useCallback((id) => ids.includes(id), [ids])
+      const toggle = useCallback((item) => {
+        if (!sessionRef.current) {
+          needLoginRef.current && needLoginRef.current() // 비로그인 → 로그인 유도
+          return
+        }
+        if (favoritesStore.has(item.id)) favoritesStore.remove(item.id)
+        else favoritesStore.add(item)
+        setIds(favoritesStore.list().map((f) => f.id)) // 저장소 → 화면 동기화
+      }, [])
+      return { ids, has, toggle, count: ids.length }
+    }
+
+    // ========================================
+    // 📄 의원 목록(카드 리스트) 컴포넌트
+    // ========================================
+    function ClinicList({
+      clinics, selectedId, onCardClick, isFav, onToggleFav,
+      sortBy, setSortBy, favOnly, setFavOnly, favCount, loading,
+      topCandidates = [], scoreActive = false,
+    }) {
+      return (
+        <div className="flex flex-col lg:h-full">
+          {/* 헤더: 카운트 + 즐겨찾기 토글 + 정렬 */}
+          <div className="shrink-0 px-3 py-2.5 border-b border-gray-200 bg-white space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-bold text-gray-800">
+                의원 목록 <span className="text-blue-600">{clinics.length}곳</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFavOnly((v) => !v)}
+                aria-pressed={favOnly}
+                className={`px-2.5 py-1 rounded-full text-xs border transition flex items-center gap-1
+                  ${favOnly ? 'bg-amber-50 border-amber-300 text-amber-700' : 'bg-white border-gray-300 text-gray-600'}`}
+              >
+                <span className={favOnly ? 'text-amber-400' : 'text-gray-400'}>★</span>
+                즐겨찾기만{favCount > 0 && <span className="text-gray-400"> ({favCount})</span>}
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-gray-500 shrink-0">정렬</label>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="flex-1 rounded-lg border border-gray-300 px-2 py-1.5 text-xs bg-white
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="score">🎯 임장 점수 높은순</option>
+                <option value="rx">처방 가중치 높은순</option>
+                <option value="date">개원일 최신순</option>
+              </select>
+            </div>
+          </div>
+
+          {/* 🎯 임장 후보 Top — 약국 데이터가 있을 때, 점수 상위 5곳을 한눈에. 클릭하면 지도 포커스. */}
+          {topCandidates.length > 0 && (
+            <div className="shrink-0 px-3 py-2.5 bg-amber-50 border-b border-amber-200 space-y-1.5">
+              <div className="text-xs font-bold text-amber-800 flex items-center gap-1">
+                🎯 임장 후보 Top {topCandidates.length}
+                <span className="font-normal text-amber-600/80">· 오늘 이것부터 돌아보세요</span>
+              </div>
+              {topCandidates.map((c, i) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => onCardClick(c)}
+                  className="w-full flex items-center gap-2 text-left rounded-lg px-2 py-1.5 bg-white
+                             border border-amber-200 hover:border-amber-400 hover:shadow-sm transition"
+                >
+                  <span className={`shrink-0 w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center
+                    ${i === 0 ? 'bg-amber-500 text-white' : 'bg-amber-100 text-amber-700'}`}>{i + 1}</span>
+                  <span className="flex-1 min-w-0 truncate text-sm font-medium text-gray-800">{c.name}</span>
+                  {c.buildingCount >= 2 && <span className="shrink-0 text-[10px] text-violet-600">🏢{c.buildingCount}</span>}
+                  <span className="shrink-0 text-xs font-bold text-amber-600">{c.score}점</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* 리스트 본문 */}
+          <div className="lg:flex-1 lg:overflow-y-auto p-3 space-y-2 bg-gray-50">
+            {loading && (
+              <div className="text-xs text-gray-400 animate-pulse text-center py-8">불러오는 중…</div>
+            )}
+            {!loading && clinics.length === 0 && (
+              <div className="text-xs text-gray-400 text-center py-10">
+                {favOnly ? '즐겨찾기한 의원이 없습니다.' : '조건에 맞는 의원이 없습니다.'}
+              </div>
+            )}
+            {!loading && clinics.map((c) => {
+              const fav = isFav(c.id)
+              const active = selectedId === c.id
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => onCardClick(c)}
+                  className={`rounded-xl border bg-white p-3 cursor-pointer transition shadow-sm hover:shadow
+                    ${active ? 'border-blue-400 ring-2 ring-blue-200' : 'border-gray-200'}`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="font-bold text-sm text-gray-900 min-w-0 truncate">{c.name}</div>
+                    <FavStar
+                      active={fav}
+                      onClick={(e) => { e.stopPropagation(); onToggleFav(c) }}
+                    />
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+                    {scoreActive && c.score != null && (
+                      <span
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200"
+                        title={`임장 점수 ${c.score}점 = 처방 ${c.sP} + 약국공백 ${c.sG} + 의사 ${c.sD} + 빌딩 ${c.sB}`}
+                      >🎯 {c.score}점</span>
+                    )}
+                    <RxBadge grade={c.grade} />
+                    {c.dr > 0 && (
+                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium
+                        ${c.dr >= 5 ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-600'}`}>
+                        🩺 의사 {c.dr}명{c.dr >= 5 ? ' · 대형' : ''}
+                      </span>
+                    )}
+                    {c.buildingCount >= 2 && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-50 text-violet-700 border border-violet-200"
+                        title={`같은 건물에 의원 ${c.buildingCount}곳 — 메디컬 빌딩(문전약국 후보)`}>
+                        🏢 메디컬빌딩 {c.buildingCount}
+                      </span>
+                    )}
+                    {c.subject && <span className="text-xs text-blue-600 truncate">{c.subject}</span>}
+                  </div>
+                  <div className="mt-2 text-xs text-gray-600 space-y-0.5">
+                    <div>🗓️ 개원 {c.openDate || '-'}</div>
+                    <div className="truncate">
+                      📍 {c.addr || '-'}
+                      {c.approx && <span className="ml-1 text-[10px] text-amber-600">· 주소 추정</span>}
+                    </div>
+                    <div>☎️ {c.tel || <span className="text-gray-400">전화 정보 없음</span>}</div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 🚀 App 컴포넌트
+    // ========================================
+    function App() {
+      const kakaoStatus = useKakaoLoader()
+
+      // 지역 선택 상태 (기본: 서울특별시 / 시군구 선택 안 함)
+      const [sido, setSido] = useState('서울특별시')
+      const [sigungu, setSigungu] = useState('')
+
+      const [raw, setRaw] = useState([])          // 좌표 변환 성공 항목
+      const [noCoordCount, setNoCoordCount] = useState(0)
+      const [pendingGeo, setPendingGeo] = useState([])  // 좌표없음 → 주소 지오코딩 대기
+      const [geoExtra, setGeoExtra] = useState([])      // 주소 추정으로 복구한 의원(approx:true)
+      const [totalCount, setTotalCount] = useState(0) // API totalCount(전체 건수)
+      const [loadErr, setLoadErr] = useState(null)
+      const [dataLoading, setDataLoading] = useState(true)
+
+      const [keyword, setKeyword] = useState('')  // 진료과목 텍스트 검색
+      const [selected, setSelected] = useState(null)
+      const [panelOpen, setPanelOpen] = useState(true) // 모바일 패널 토글
+
+      // 추가 기능 상태
+      const [sortBy, setSortBy] = useState('score')              // 'score'(임장 점수순·기본) | 'rx' | 'date'
+      const [activeGrades, setActiveGrades] = useState({ high: true, mid: true, low: true }) // 등급 필터 토글
+      const [favOnly, setFavOnly] = useState(false)              // 즐겨찾기만 보기
+      const auth = useAuth()                                     // 카카오 로그인 (Supabase Auth)
+      const favorites = useFavorites(auth.session, () => {
+        // 비로그인 상태에서 별 클릭 → 로그인 유도 (마이그레이션 없음 · DEV.md 확정)
+        if (window.confirm('즐겨찾기는 카카오 로그인 후 이용할 수 있어요.\n로그인할까요?')) auth.login()
+      })
+
+      // 신규 개원 기간(개월, 롤링) — 기본 6. 약국 경쟁 레이어 상태.
+      const [sinceMonths, setSinceMonths] = useState(6)
+      const [showPharm, setShowPharm] = useState(false)          // 약국 레이어 토글
+      const [pharmacies, setPharmacies] = useState([])           // 약국 마커(매핑 완료)
+      const [pharmLoading, setPharmLoading] = useState(false)
+      const [pharmNotice, setPharmNotice] = useState(null)       // 안내/에러 문구
+      const [pharmProgress, setPharmProgress] = useState(null)   // { loaded, total, count } 점진 로딩 진행률
+      const [oppThreshold, setOppThreshold] = useState(150)      // 기회 자리 판정 반경(m)
+      const [oppOnly, setOppOnly] = useState(false)              // 기회 자리만 보기 필터
+      const [doctorMap, setDoctorMap] = useState({})             // HIRA 의사수 맵(정규화명→{drTotCnt,sdrCnt})
+      const [drLoading, setDrLoading] = useState(false)          // HIRA 의사수 보강 로딩 표시
+      const [drFilter, setDrFilter] = useState(0)                // 의사 N명+ 필터 (0=끔)
+
+      const toggleGrade = (key) => setActiveGrades((p) => ({ ...p, [key]: !p[key] }))
+      // favorites.toggle 은 useFavorites 내부에서 useCallback([])로 안정화됨 →
+      // 그대로 전달해야 KakaoMap 마커 effect가 매 렌더마다 재실행(=bounds 초기화)되지 않음
+      const handleToggleFav = favorites.toggle
+
+      // 현재 시/도에 해당하는 시군구 목록
+      const guList = useMemo(() => {
+        const found = REGIONS.find((r) => r.sido === sido)
+        return found ? found.gu : []
+      }, [sido])
+
+      // LIKE 매칭에 사용할 지역 문자열 (시군구 있으면 "시도 시군구")
+      const regionLike = useMemo(() => {
+        return sigungu ? `${sido} ${sigungu}` : sido
+      }, [sido, sigungu])
+
+      // 화면 제목용 지역명 (시군구 우선)
+      const regionTitle = sigungu || sido
+
+      // 최신 요청만 반영하기 위한 식별자 + 이전 요청 취소용 컨트롤러
+      const reqIdRef = useRef(0)
+      const abortRef = useRef(null)
+      // 약국 조회 전용 식별자/취소 컨트롤러(의원 조회와 독립)
+      const pharmReqRef = useRef(0)
+      const pharmAbortRef = useRef(null)
+      // HIRA 의사수 보강 조회 식별자
+      const drReqRef = useRef(0)
+      const geoReqRef = useRef(0)
+
+      // 지역 조회 (API 직접 호출 → 전체 페이지 수집 → 좌표 변환)
+      const loadRegion = useCallback(async (region, months) => {
+        const myId = ++reqIdRef.current
+        if (abortRef.current) abortRef.current.abort() // 진행 중이던 이전 조회 취소(중복 방지)
+        const ctrl = new AbortController()
+        abortRef.current = ctrl
+
+        setDataLoading(true)
+        setLoadErr(null)
+        setSelected(null)
+        try {
+          const { total, items } = await fetchAllClinics(region, months, ctrl.signal)
+          if (myId !== reqIdRef.current) return // 더 최신 요청이 있으면 무시
+          const { mapped, noCoord, noCoordItems } = mapClinics(items)
+          setRaw(mapped)
+          setNoCoordCount(noCoord)
+          setTotalCount(total)
+          setGeoExtra([])                       // 지역 바뀌면 이전 복구분 비움
+          setPendingGeo(noCoordItems || [])     // 좌표없음 → 지오코딩 대기열로
+        } catch (e) {
+          if (e.name === 'AbortError') return         // 취소된 요청은 무시
+          if (myId !== reqIdRef.current) return
+          setLoadErr(e.message)
+          setRaw([]); setNoCoordCount(0); setTotalCount(0)
+          setGeoExtra([]); setPendingGeo([])
+        } finally {
+          if (myId === reqIdRef.current) setDataLoading(false)
+        }
+      }, [])
+
+      // 지역(regionLike)·기간(sinceMonths) 바뀔 때마다 자동 조회 — 최초 마운트 시 서울 조회도 여기서 발생
+      useEffect(() => {
+        loadRegion(regionLike, sinceMonths)
+      }, [regionLike, sinceMonths, loadRegion])
+
+      // 🎯 기회 자리 전면화 — 구를 선택하면 약국 경쟁 레이어를 자동으로 켠다(임장 후보가 바로 뜨게).
+      //  사용자가 끄면 그 구에선 꺼진 채 유지되고, 구를 바꾸면 다시 켜진다.
+      useEffect(() => {
+        if (sigungu) setShowPharm(true)
+      }, [sigungu])
+
+      // 약국 경쟁 레이어 로드 — '구 선택 + 토글 ON'일 때만(서울 전체는 데이터 과다로 제외).
+      // 페이지별로 받아 점진적으로 채운다 → 진행률(pharmProgress)과 점이 실시간으로 쌓인다.
+      useEffect(() => {
+        if (!showPharm || !sigungu) {
+          if (pharmAbortRef.current) pharmAbortRef.current.abort()
+          setPharmacies([])
+          setPharmLoading(false)
+          setPharmProgress(null)
+          setPharmNotice(showPharm && !sigungu ? '시/군/구를 선택하면 약국 경쟁이 표시됩니다.' : null)
+          return
+        }
+        const myId = ++pharmReqRef.current
+        if (pharmAbortRef.current) pharmAbortRef.current.abort()
+        const ctrl = new AbortController()
+        pharmAbortRef.current = ctrl
+        setPharmLoading(true)
+        setPharmNotice(null)
+        setPharmacies([])
+        setPharmProgress({ loaded: 0, total: 1, count: 0 })
+
+        ;(async () => {
+          try {
+            const first = await fetchPharmaciesPage(regionLike, 1, ctrl.signal)
+            if (myId !== pharmReqRef.current) return
+            const totalPages = Math.max(1, first.totalPages)
+            let acc = mapPharmacies(first.items).mapped
+            setPharmacies(acc.slice())
+            setPharmProgress({ loaded: 1, total: totalPages, count: first.totalCount })
+            for (let p = 2; p <= totalPages; p++) {
+              const pg = await fetchPharmaciesPage(regionLike, p, ctrl.signal)
+              if (myId !== pharmReqRef.current) return
+              acc = acc.concat(mapPharmacies(pg.items).mapped)
+              setPharmacies(acc.slice())
+              setPharmProgress({ loaded: p, total: totalPages, count: first.totalCount })
+            }
+          } catch (e) {
+            if (e.name === 'AbortError' || myId !== pharmReqRef.current) return
+            setPharmacies([])
+            setPharmNotice(e.message || '약국 데이터를 불러오지 못했습니다.')
+          } finally {
+            if (myId === pharmReqRef.current) { setPharmLoading(false); setPharmProgress(null) }
+          }
+        })()
+      }, [showPharm, sigungu, regionLike])
+
+      // HIRA 의사수 보강 — 구 선택 시 백그라운드로 받아 의원에 붙인다(본 조회와 독립, 늦게 와도 OK).
+      useEffect(() => {
+        if (!sigungu) { setDoctorMap({}); setDrLoading(false); return }
+        const myId = ++drReqRef.current
+        const ctrl = new AbortController()
+        setDoctorMap({})        // 구가 바뀌면 이전 구의 배지를 즉시 비움(혼동 방지)
+        setDrLoading(true)
+        fetchDoctorMap(regionLike, ctrl.signal)
+          .then((map) => { if (myId === drReqRef.current) { setDoctorMap(map); setDrLoading(false) } })
+          .catch(() => { if (myId === drReqRef.current) { setDoctorMap({}); setDrLoading(false) } })
+        return () => ctrl.abort()
+      }, [sigungu, regionLike])
+
+      // 📍 좌표없음 의원 복구 — 주소로 지오코딩(백그라운드, kakao ready 후). 메인 핀 렌더를 막지 않는다.
+      useEffect(() => {
+        if (kakaoStatus !== 'ready' || !pendingGeo.length) return
+        const myId = ++geoReqRef.current
+        let alive = true
+        geocodeClinics(pendingGeo).then((list) => {
+          if (alive && myId === geoReqRef.current) setGeoExtra(list)
+        })
+        return () => { alive = false }
+      }, [pendingGeo, kakaoStatus])
+
+      // 좌표 확보 의원 = 변환 성공(raw) + 주소 추정 복구(geoExtra). 이하 모든 파생값의 기준.
+      const rawAll = useMemo(
+        () => (geoExtra.length ? raw.concat(geoExtra) : raw),
+        [raw, geoExtra]
+      )
+
+      // ⭐ 기회 자리 id 집합 — 전체 좌표 의원(rawAll) 기준이라 등급·키워드 필터와 무관하게 안정적.
+      // 로딩 중엔 EMPTY_IDS(고정 참조)로 둬서, 약국이 페이지마다 늘어도 의원 핀이 깜빡이지 않게 한다.
+      // 의원→가장 가까운 약국 거리(m) 맵. 약국 로딩 완료+데이터 있을 때만 계산(없으면 null).
+      //  점수(약국공백)와 기회자리 판정 모두 이 한 번의 계산을 공유한다.
+      const nearestDistMap = useMemo(() => {
+        if (pharmLoading || pharmacies.length === 0) return null
+        const m = new Map()
+        for (const c of rawAll) m.set(c.id, nearestPharmDist(c, pharmacies))
+        return m
+      }, [rawAll, pharmacies, pharmLoading])
+
+      // 기회 자리 판정이 유효한 상태(약국 로딩 완료 + 데이터 있음)
+      const oppActive = !!nearestDistMap
+
+      // ⭐ 기회 자리 id 집합 — 반경(oppThreshold) 밖에 약국이 있는(=공백) 의원. 지도 금색 후광·필터용.
+      const opportunityIds = useMemo(() => {
+        if (!nearestDistMap) return EMPTY_IDS
+        const s = new Set()
+        nearestDistMap.forEach((d, id) => { if (d > oppThreshold) s.add(id) })
+        return s
+      }, [nearestDistMap, oppThreshold])
+
+      // 같은 건물(도로명)에 모인 의원 수 — 메디컬 빌딩 가점용.
+      const buildingCounts = useMemo(() => computeMedicalBuildings(rawAll), [rawAll])
+
+      // HIRA 의사수를 의원에 부착(이름 매칭) — 의사맵이 늦게 와도 자동 반영. 매칭 없으면 그대로.
+      const enrichedRaw = useMemo(() => {
+        if (!Object.keys(doctorMap).length) return rawAll
+        return rawAll.map((c) => {
+          const d = doctorMap[normClinicName(c.name)]
+          return d ? { ...c, dr: d.drTotCnt, sdr: d.sdrCnt } : c
+        })
+      }, [rawAll, doctorMap])
+
+      // 🎯 임장 점수 부착 — 처방수요+약국공백+의사규모+메디컬빌딩. 약국데이터 없으면 공백점수 0.
+      const scored = useMemo(() => {
+        const hasPharm = !!nearestDistMap
+        return enrichedRaw.map((c) => {
+          const distM = nearestDistMap ? (nearestDistMap.get(c.id) ?? Infinity) : Infinity
+          const bk = buildingKey(c.addr)
+          const buildingCount = bk ? (buildingCounts.get(bk) || 1) : 1
+          const sc = scoreClinic(c, distM, buildingCount, hasPharm)
+          return { ...c, ...sc, nearestDist: distM, buildingCount }
+        })
+      }, [enrichedRaw, nearestDistMap, buildingCounts])
+
+      // 진료과목 키워드 필터 (받아온 새 데이터에 적용)
+      const filtered = useMemo(() => {
+        const kw = keyword.trim()
+        if (!kw) return scored
+        return scored.filter((c) => (c.subject || '').includes(kw))
+      }, [scored, keyword])
+
+      // 화면 최종 표시 목록 = 키워드필터 → 등급필터 → 즐겨찾기필터 → 정렬
+      // (지도 마커와 리스트가 동일한 이 목록을 공유한다)
+      const visible = useMemo(() => {
+        let arr = filtered.filter((c) => {
+          const bucket = (RX_GRADES[c.grade] || RX_GRADES.etc).bucket // etc 는 mid 버킷
+          return activeGrades[bucket]
+        })
+        if (favOnly) arr = arr.filter((c) => favorites.has(c.id))
+        // 기회 자리만 보기 — 약국 데이터가 있을 때만 적용(없으면 무효)
+        if (oppOnly && oppActive) arr = arr.filter((c) => opportunityIds.has(c.id))
+        // 의사 N명+ 필터
+        if (drFilter > 0) arr = arr.filter((c) => (c.dr || 0) >= drFilter)
+
+        const sorted = [...arr]
+        if (sortBy === 'score') {
+          // 임장 점수 높은순 → 개원일 최신순
+          sorted.sort((a, b) => {
+            const sa = a.score || 0, sb = b.score || 0
+            if (sb !== sa) return sb - sa
+            return String(b.openDate || '').localeCompare(String(a.openDate || ''))
+          })
+        } else if (sortBy === 'rx') {
+          // 처방 가중치 높은순 → 의사수 많은순 → 개원일 최신순
+          sorted.sort((a, b) => {
+            const wa = (RX_GRADES[a.grade] || RX_GRADES.etc).weight
+            const wb = (RX_GRADES[b.grade] || RX_GRADES.etc).weight
+            if (wb !== wa) return wb - wa
+            const da = a.dr || 0, db = b.dr || 0
+            if (db !== da) return db - da
+            return String(b.openDate || '').localeCompare(String(a.openDate || ''))
+          })
+        } else {
+          // 개원일 최신순
+          sorted.sort((a, b) => String(b.openDate || '').localeCompare(String(a.openDate || '')))
+        }
+        return sorted
+      }, [filtered, activeGrades, favOnly, favorites, sortBy, oppOnly, oppActive, opportunityIds, drFilter])
+
+      // 🎯 임장 후보 Top — 현재 필터를 반영한 표시 목록 중 점수 상위 5(약국 데이터 있을 때만).
+      const topCandidates = useMemo(() => {
+        if (!oppActive || visible.length === 0) return []
+        return [...visible].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 5)
+      }, [visible, oppActive])
+
+      // 현재 표시 목록 중 기회 자리 수 (통계·필터 라벨용)
+      const oppCount = useMemo(
+        () => visible.filter((c) => opportunityIds.has(c.id)).length,
+        [visible, opportunityIds]
+      )
+
+      const handleSelect = useCallback((c) => setSelected(c), [])
+
+      // 시/도 변경 시 시군구는 초기화
+      const handleSidoChange = (e) => {
+        setSido(e.target.value)
+        setSigungu('')
+      }
+
+      return (
+        <div className="h-full w-full flex flex-col">
+          {/* 헤더 */}
+          <header className="shrink-0 bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-base sm:text-lg font-bold text-gray-900 truncate">
+                {regionTitle} 신규 개원 의원 지도 <span className="text-blue-600">(2026)</span>
+              </h1>
+              <p className="text-xs text-gray-500 hidden sm:block">약국 개업 입지 분석용 · 진료과목으로 처방 수요를 가늠해 보세요</p>
+            </div>
+            {/* 로그인 상태/버튼 (카카오) */}
+            <AuthBar session={auth.session} ready={auth.ready} onLogin={auth.login} onLogout={auth.logout} />
+            {/* 모바일: 패널 토글 (라벨 + 화살표 — 열림 ▲ / 닫힘 ▼) */}
+            <button
+              type="button"
+              onClick={() => setPanelOpen((v) => !v)}
+              aria-label={panelOpen ? '지역·필터 패널 닫기' : '지역·필터 패널 열기'}
+              aria-expanded={panelOpen}
+              className="lg:hidden shrink-0 flex items-center gap-1.5 pl-3 pr-2 py-2 rounded-lg
+                         bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium transition"
+            >
+              <span>지역·필터</span>
+              <svg
+                xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                className={`transition-transform duration-200 ${panelOpen ? 'rotate-180' : ''}`}
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+          </header>
+
+          {/* 본문: 컨트롤 패널 + 지도 + 의원 목록 (모바일: 세로 스택/페이지 스크롤, lg: 3컬럼) */}
+          <div className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden flex flex-col lg:flex-row">
+            {/* 좌측 컨트롤 패널 */}
+            <aside
+              className={`lg:w-80 shrink-0 bg-white lg:border-r border-gray-200 overflow-y-auto
+                ${panelOpen ? 'block' : 'hidden'} lg:block
+                ${panelOpen ? 'max-h-[55vh] lg:max-h-none border-b' : ''}`}
+            >
+              <div className="p-4 space-y-4">
+                {/* 지역 선택 (시/도 + 시군구 연동) */}
+                <div className="rounded-xl border border-gray-200 p-3 space-y-2.5">
+                  <div className="text-xs font-semibold text-gray-600">지역 선택</div>
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-1">시/도</label>
+                    <select
+                      value={sido}
+                      onChange={handleSidoChange}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm bg-white
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      {REGIONS.map((r) => (
+                        <option key={r.sido} value={r.sido}>{r.sido}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-gray-500 mb-1">시/군/구</label>
+                    <select
+                      value={sigungu}
+                      onChange={(e) => setSigungu(e.target.value)}
+                      disabled={guList.length === 0}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm bg-white
+                                 disabled:bg-gray-100 disabled:text-gray-400
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      <option value="">선택 안 함 (시/도 전체)</option>
+                      {guList.map((g) => (
+                        <option key={g} value={g}>{g}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="text-[11px] text-gray-400">
+                    조회 지역: <span className="text-gray-600 font-medium">{regionLike}</span>
+                    {dataLoading && <span className="ml-1 text-blue-500 animate-pulse">· 조회 중…</span>}
+                  </div>
+                </div>
+
+                {/* 신규 개원 기간 (롤링 N개월) */}
+                <div className="rounded-xl border border-gray-200 p-3 space-y-2">
+                  <div className="text-xs font-semibold text-gray-600">신규 개원 기간 <span className="font-normal text-gray-400">(최근)</span></div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[3, 6, 12].map((m) => (
+                      <Chip key={m} active={sinceMonths === m} onClick={() => setSinceMonths(m)} className="w-full text-center">
+                        {m}개월
+                      </Chip>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-gray-400 leading-snug">오늘 기준 최근 N개월 내 개원한 의원만 조회</p>
+                </div>
+
+                {/* 의사수 보강 로딩 중 — 심평원 응답이 늦게 와도 멈춘 게 아님을 알림 */}
+                {drLoading && Object.keys(doctorMap).length === 0 && (
+                  <div className="rounded-xl border border-gray-200 p-3">
+                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                      <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-violet-200 border-t-violet-500 animate-spin" />
+                      <span>🩺 의사수 불러오는 중… <span className="text-gray-400">(심평원)</span></span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 규모(의사수) 필터 — 구 선택 시 HIRA 보강 데이터가 있을 때만 표시 */}
+                {Object.keys(doctorMap).length > 0 && (
+                  <div className="rounded-xl border border-gray-200 p-3 space-y-2">
+                    <div className="text-xs font-semibold text-gray-600">규모(의사수) 필터</div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[{ v: 0, l: '전체' }, { v: 2, l: '2명+' }, { v: 5, l: '5명+' }].map((o) => (
+                        <Chip key={o.v} active={drFilter === o.v} onClick={() => setDrFilter(o.v)} className="w-full text-center">{o.l}</Chip>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-gray-400 leading-snug">의사 많은 의원 = 처방 잠재력 ↑ · 출처 HIRA(심평원)</p>
+                  </div>
+                )}
+
+                {/* 약국 경쟁 레이어 (구 선택 시) */}
+                <div className="rounded-xl border border-gray-200 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-semibold text-gray-600">약국 경쟁 레이어</div>
+                    <button
+                      type="button"
+                      onClick={() => setShowPharm((v) => !v)}
+                      aria-pressed={showPharm}
+                      className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition
+                        ${showPharm ? 'bg-teal-500 border-teal-500 text-white' : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                    >
+                      {showPharm ? '켜짐' : '꺼짐'}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-gray-500">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full border border-white shadow-sm" style={{ background: '#14b8a6' }} />
+                    영업 중 약국 위치 = 경쟁 강도
+                  </div>
+                  {showPharm && pharmLoading && pharmProgress && (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px] text-teal-700">
+                        <span>약국 불러오는 중… {pharmacies.length}{pharmProgress.count ? '/' + pharmProgress.count : ''}곳</span>
+                        <span className="text-gray-400">{pharmProgress.loaded}/{pharmProgress.total}p</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-teal-500 transition-all duration-300"
+                          style={{ width: Math.round((pharmProgress.loaded / Math.max(1, pharmProgress.total)) * 100) + '%' }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {showPharm && !pharmLoading && pharmacies.length > 0 && (
+                    <div className="text-[11px] text-gray-500">이 지역 약국 <b className="text-teal-600">{pharmacies.length}곳</b></div>
+                  )}
+                  {pharmNotice && (
+                    <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 leading-snug">
+                      {pharmNotice}
+                    </div>
+                  )}
+
+                  {/* ⭐ 기회 자리 (약국 데이터 있을 때만) */}
+                  {showPharm && !pharmLoading && oppActive && (
+                    <div className="pt-2 mt-1 border-t border-gray-100 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-gray-500">약국 공백 반경</span>
+                        <div className="flex gap-1">
+                          {[100, 150, 200].map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() => setOppThreshold(m)}
+                              className={`px-2 py-0.5 rounded-md text-[11px] border transition
+                                ${oppThreshold === m ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}
+                            >
+                              {m}m
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setOppOnly((v) => !v)}
+                        aria-pressed={oppOnly}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-sm transition
+                          ${oppOnly ? 'bg-amber-50 border-amber-300' : 'bg-white border-gray-300 hover:bg-gray-50'}`}
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-amber-500" />
+                          <span className="font-medium text-gray-700">⭐ 기회 자리만</span>
+                        </span>
+                        <span className="text-xs text-amber-600 font-semibold">{oppCount}곳</span>
+                      </button>
+                      <p className="text-[10px] text-gray-400 leading-snug">
+                        반경 {oppThreshold}m 내 약국이 없는 신규 의원(금색 후광) = 임장 후보
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* 통계 */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-xl bg-blue-50 p-3">
+                    <div className="text-2xl font-bold text-blue-700">{visible.length}</div>
+                    <div className="text-xs text-blue-600">표시 의원(지도·목록)</div>
+                  </div>
+                  <div className="rounded-xl bg-amber-50 p-3">
+                    <div className="text-2xl font-bold text-amber-600">{favorites.count}</div>
+                    <div className="text-xs text-amber-700">⭐ 즐겨찾기</div>
+                  </div>
+                </div>
+                <div className="text-[11px] text-gray-400">
+                  좌표 확보 <b className="text-gray-600">{rawAll.length}건</b>
+                  {geoExtra.length > 0 && <span className="text-gray-400">(변환 {raw.length} + 주소추정 {geoExtra.length})</span>} 중 현재 조건으로 표시
+                </div>
+
+                {/* 전체 건수(API totalCount) */}
+                <div className="text-xs text-gray-500">
+                  API 전체 건수(totalCount): <b className="text-gray-700">{totalCount}건</b>
+                </div>
+
+                {noCoordCount > 0 && (() => {
+                  const remain = noCoordCount - geoExtra.length
+                  const pending = pendingGeo.length > 0 && geoExtra.length === 0
+                  if (pending) return (
+                    <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                      📍 좌표없음 <b>{noCoordCount}건</b> — 주소로 위치 추정 중…
+                    </div>
+                  )
+                  if (geoExtra.length > 0) return (
+                    <div className="text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+                      📍 좌표없음 {noCoordCount}건 중 <b>{geoExtra.length}건</b> 주소로 위치 추정해 표시
+                      {remain > 0 && <span className="text-gray-500"> · 나머지 {remain}건 제외</span>}
+                    </div>
+                  )
+                  return (
+                    <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      ⚠️ 좌표없음 <b>{noCoordCount}건</b> 제외 (주소만 있고 좌표 미제공)
+                    </div>
+                  )
+                })()}
+
+                {/* 검색 */}
+                <div>
+                  <label className="block text-xs font-semibold text-gray-600 mb-1.5">진료과목 검색</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={keyword}
+                      onChange={(e) => setKeyword(e.target.value)}
+                      placeholder="예: 내과, 소아청소년과, 이비인후과"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm
+                                 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    {keyword && (
+                      <button
+                        type="button"
+                        onClick={() => setKeyword('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-lg"
+                        aria-label="검색어 지우기"
+                      >×</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 빠른 필터 칩 */}
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 mb-1.5">처방 수요 높은 과 (빠른 필터)</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Chip active={!keyword} onClick={() => setKeyword('')}>전체</Chip>
+                    {QUICK_SUBJECTS.map((s) => (
+                      <Chip key={s} active={keyword === s} onClick={() => setKeyword(s)}>{s}</Chip>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 처방 가중치 범례 + 등급 필터 */}
+                <div className="rounded-xl border border-gray-200 p-3 space-y-2">
+                  <div className="text-xs font-semibold text-gray-600">처방 가중치 (범례 · 등급 필터)</div>
+                  <p className="text-[11px] text-gray-400 leading-snug">
+                    진료과목으로 처방 기대도를 분류했어요. 항목을 눌러 등급별 표시를 켜고 끌 수 있어요.
+                  </p>
+                  <div className="space-y-1.5">
+                    {['high', 'mid', 'low'].map((key) => {
+                      const g = RX_GRADES[key]
+                      // 해당 버킷(미분류 etc 포함)에 속하는 의원 수
+                      const cnt = filtered.filter((c) => (RX_GRADES[c.grade] || RX_GRADES.etc).bucket === key).length
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => toggleGrade(key)}
+                          aria-pressed={activeGrades[key]}
+                          className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-sm transition
+                            ${activeGrades[key] ? 'bg-white border-gray-300' : 'bg-gray-50 border-gray-200 opacity-50'}`}
+                        >
+                          <span className={`w-3 h-3 rounded-full ${g.dot}`} />
+                          <span className="font-medium text-gray-700">{g.label}</span>
+                          <span className="ml-auto text-xs text-gray-400">{cnt}곳</span>
+                          <span className="text-xs">{activeGrades[key] ? '👁️' : '🚫'}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <p className="text-[10px] text-gray-400 leading-snug">
+                    ※ 여러 과를 가진 의원은 가장 높은 등급으로 표시 · 미분류 과는 중처방(회색)으로 처리
+                  </p>
+                </div>
+
+                {/* 선택된 의원 요약 */}
+                {selected && (
+                  <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="text-sm font-bold text-gray-900 mb-1 min-w-0 truncate">{selected.name}</div>
+                      <FavStar
+                        active={favorites.has(selected.id)}
+                        onClick={() => handleToggleFav(selected)}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                      {oppActive && selected.score != null && (
+                        <Badge className="bg-amber-100 text-amber-700 border border-amber-200 font-bold">🎯 {selected.score}점</Badge>
+                      )}
+                      <RxBadge grade={selected.grade} />
+                      {selected.dr > 0 && (
+                        <Badge className={selected.dr >= 5 ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-600'}>
+                          🩺 의사 {selected.dr}명{selected.dr >= 5 ? ' · 대형' : ''}
+                        </Badge>
+                      )}
+                      {selected.buildingCount >= 2 && (
+                        <Badge className="bg-violet-50 text-violet-700 border border-violet-200">🏢 메디컬빌딩 {selected.buildingCount}</Badge>
+                      )}
+                      {selected.subject && (
+                        <Badge className="bg-blue-100 text-blue-700">{selected.subject}</Badge>
+                      )}
+                    </div>
+                    {oppActive && selected.score != null && (
+                      <div className="text-[11px] text-gray-500 mb-2">
+                        점수 근거: 처방 {selected.sP} + 약국공백 {selected.sG}
+                        {isFinite(selected.nearestDist) && <span className="text-gray-400"> (최근접 약국 {Math.round(selected.nearestDist)}m)</span>}
+                        {' '}+ 의사 {selected.sD} + 빌딩 {selected.sB}
+                      </div>
+                    )}
+                    <div className="text-xs text-gray-600 space-y-1 mt-1">
+                      <div>🗓️ 개원 {selected.openDate || '-'}</div>
+                      <div>
+                        📍 {selected.addr || '-'}
+                        {selected.approx && <span className="ml-1 text-[11px] text-amber-600">· 주소 추정 위치</span>}
+                      </div>
+                      <div>☎️ {selected.tel || '전화 정보 없음'}</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 데이터 로딩/에러/빈 상태 */}
+                {dataLoading && <div className="text-xs text-gray-400 animate-pulse">데이터를 불러오는 중…</div>}
+                {loadErr && (
+                  <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                    데이터 로드 오류: {loadErr}
+                  </div>
+                )}
+
+                {!dataLoading && !loadErr && totalCount === 0 && (
+                  <div className="text-xs text-gray-500 text-center py-4 bg-gray-50 rounded-lg">
+                    해당 지역 신규 개원 의원이 없습니다.
+                  </div>
+                )}
+
+                {!dataLoading && filtered.length === 0 && rawAll.length > 0 && (
+                  <div className="text-xs text-gray-400 text-center py-4">
+                    "{keyword}" 진료과목에 해당하는 의원이 없습니다.
+                  </div>
+                )}
+
+                <p className="text-[11px] text-gray-400 leading-relaxed pt-1 border-t border-gray-100">
+                  좌표계: 한국 TM 중부원점(EPSG:5174) → WGS84 변환(proj4).<br />
+                  데이터: 공공데이터포털 신규 개원(영업중·의원) 실시간 조회.
+                </p>
+              </div>
+            </aside>
+
+            {/* 지도 (모바일: 고정 높이, lg: 남는 폭 채움) */}
+            <main className="relative shrink-0 h-[55vh] lg:h-full lg:flex-1 lg:min-h-0">
+              <KakaoMap
+                clinics={visible}
+                pharmacies={pharmacies}
+                opportunityIds={opportunityIds}
+                kakaoStatus={kakaoStatus}
+                onSelect={handleSelect}
+                focusClinic={selected}
+                onToggleFav={handleToggleFav}
+              />
+            </main>
+
+            {/* 의원 목록 패널 (모바일: 지도 아래, lg: 우측 컬럼) */}
+            <section className="shrink-0 lg:w-96 lg:shrink-0 lg:h-full bg-white border-t lg:border-t-0 lg:border-l border-gray-200">
+              <ClinicList
+                clinics={visible}
+                selectedId={selected ? selected.id : null}
+                onCardClick={handleSelect}
+                isFav={favorites.has}
+                onToggleFav={handleToggleFav}
+                sortBy={sortBy}
+                setSortBy={setSortBy}
+                favOnly={favOnly}
+                setFavOnly={setFavOnly}
+                favCount={favorites.count}
+                loading={dataLoading}
+                topCandidates={topCandidates}
+                scoreActive={oppActive}
+              />
+            </section>
+          </div>
+        </div>
+      )
+    }
+
+    // ========================================
+    // 렌더링
+    // ========================================
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+  </script>
+</body>
+</html>

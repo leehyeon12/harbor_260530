@@ -1,0 +1,16 @@
+{
+  "name": "clinic-pharmacy-map",
+  "version": "1.0.0",
+  "description": "신규 개원 의원/약국 지도 — 공공데이터 serviceKey를 server.js 뒤(.env)로 숨기는 프록시 서버. 외부 의존성 0개(Node 내장 모듈만).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "private": true,
+  "dependencies": {
+    "pg": "^8.22.0"
+  }
+}

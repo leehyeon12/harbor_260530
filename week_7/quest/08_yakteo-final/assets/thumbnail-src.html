@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; background: #333; }
+  #thumb {
+    width: 1920px; height: 1080px; overflow: hidden; position: relative;
+    background: linear-gradient(135deg, #0b1f5e 0%, #1d4ed8 60%, #2563eb 100%);
+    font-family: 'Apple SD Gothic Neo', 'Pretendard', sans-serif;
+    display: flex; align-items: center;
+  }
+  /* 배경 장식 링 */
+  #thumb::before {
+    content: ''; position: absolute; width: 1300px; height: 1300px;
+    border: 70px solid rgba(255,255,255,0.05); border-radius: 50%;
+    top: -520px; left: -420px;
+  }
+  #thumb::after {
+    content: ''; position: absolute; width: 700px; height: 700px;
+    border: 40px solid rgba(255,255,255,0.05); border-radius: 50%;
+    bottom: -300px; right: 430px;
+  }
+  .left {
+    width: 46%; padding: 0 0 0 96px; position: relative; z-index: 2;
+    color: #fff;
+  }
+  .badge {
+    display: inline-block; font-size: 26px; font-weight: 600;
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
+    padding: 10px 22px; border-radius: 9999px; margin-bottom: 42px; letter-spacing: 1px;
+  }
+  .logo-row { display: flex; align-items: center; gap: 34px; margin-bottom: 30px; }
+  .pin {
+    width: 120px; height: 120px; background: #fff; border-radius: 50% 50% 50% 0;
+    transform: rotate(-45deg); display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 16px 44px rgba(0,0,0,0.3); flex-shrink: 0;
+  }
+  .pin .cross { transform: rotate(45deg); width: 58px; height: 58px; position: relative; }
+  .pin .cross::before, .pin .cross::after { content: ''; position: absolute; background: #2563eb; border-radius: 8px; }
+  .pin .cross::before { width: 58px; height: 20px; top: 19px; left: 0; }
+  .pin .cross::after  { width: 20px; height: 58px; top: 0; left: 19px; }
+  h1 { font-size: 170px; font-weight: 800; margin: 0; line-height: 1; letter-spacing: 4px; }
+  .tagline { font-size: 54px; font-weight: 700; line-height: 1.35; margin: 26px 0 34px; }
+  .tagline .hl { color: #fbbf24; }
+  .chips { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 52px; max-width: 700px; }
+  .chip {
+    font-size: 26px; font-weight: 600; color: #dbeafe;
+    background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.22);
+    padding: 12px 24px; border-radius: 9999px;
+  }
+  .url {
+    font-size: 40px; font-weight: 700; color: #fbbf24; letter-spacing: 1px;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+  .shot-wrap {
+    position: absolute; right: -150px; top: 110px; z-index: 3;
+    width: 1180px; border-radius: 18px; overflow: hidden;
+    box-shadow: 0 40px 90px rgba(0,0,0,0.45);
+    transform: rotate(0deg);
+    background: #fff;
+  }
+  .browser-bar {
+    height: 52px; background: #e8edf5; display: flex; align-items: center; padding: 0 22px; gap: 10px;
+  }
+  .dot { width: 15px; height: 15px; border-radius: 50%; }
+  .addr {
+    flex: 1; margin-left: 12px; background: #fff; border-radius: 9999px;
+    font-size: 21px; color: #475569; padding: 8px 20px; font-weight: 600;
+  }
+  .shot-wrap img { display: block; width: 100%; }
+  .star-deco { position: absolute; color: #fbbf24; z-index: 4; text-shadow: 0 6px 20px rgba(0,0,0,0.35); }
+</style>
+</head>
+<body>
+  <div id="thumb">
+    <div class="left">
+      <div class="badge">하버스쿨 AI 공장장 부트캠프 · 파이널 프로젝트</div>
+      <div class="logo-row">
+        <div class="pin"><div class="cross"></div></div>
+        <h1>약터</h1>
+      </div>
+      <div class="tagline">임장 전에,<br>목 좋은 자리를 <span class="hl">데이터</span>로.</div>
+      <div class="chips">
+        <span class="chip">🏥 신규 개원 의원 겹쳐보기</span>
+        <span class="chip">🎯 임장 점수</span>
+        <span class="chip">✨ 기회 자리</span>
+        <span class="chip">💬 카카오 로그인 · ★ 즐겨찾기</span>
+      </div>
+      <div class="url">yakteo-map.vercel.app</div>
+    </div>
+    <div class="shot-wrap">
+      <div class="browser-bar">
+        <span class="dot" style="background:#f87171"></span>
+        <span class="dot" style="background:#fbbf24"></span>
+        <span class="dot" style="background:#34d399"></span>
+        <span class="addr">🔒 yakteo-map.vercel.app</span>
+      </div>
+      <img src="./yakteo-hero2.png" alt="약터 앱 화면">
+    </div>
+    <div class="star-deco" style="top:58px; right:190px; font-size:74px;">★</div>
+    <div class="star-deco" style="bottom:70px; left:830px; font-size:46px; opacity:.85;">★</div>
+  </div>
+</body>
+</html>
